@@ -96,8 +96,13 @@ object AllTests extends App {
   println("Time needed: " + (timeAfter - timeBefore) + "ms")
   println
   
+  var exceptions = false
   for(tf <- r.exceptions) { 
     tf.printStackTrace
+    exceptions = true
   }
+
+  if (exceptions)
+    sys.error("tests failed")
   
 }

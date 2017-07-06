@@ -42,16 +42,13 @@ lazy val root = (project in file(".")).
 //
   settings(
     scalaSource in Compile := baseDirectory.value / "src",
+    scalaSource in Test := baseDirectory.value / "test",
 //
     mainClass in Compile := Some("ap.CmdlMain"),
 //
     scalacOptions in Compile ++=
       List("-feature",
            "-language:implicitConversions,postfixOps,reflectiveCalls"),
-    scalacOptions <+= scalaVersion map { sv => sv match {
-      case "2.11.8" => "-optimise"
-      case "2.12.1" => "-opt:l:classpath"
-    }},
 //
     libraryDependencies +=
       "org.scala-lang.modules" %% "scala-parser-combinators" % "1.0.4",
