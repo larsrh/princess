@@ -76,7 +76,9 @@ object Interpolator
       (!res.predicates.isEmpty || !elimQuantifiers ||
        (Conjunction collectQuantifiers res).isEmpty) &&
       (res.constants subsetOf iContext.globalConstants) &&
-      (res.predicates subsetOf iContext.globalPredicates)
+      (res.predicates subsetOf (iContext.globalPredicates ++
+                                (for (a <- certificate.theoryAxioms.iterator;
+                                      p <- a.predicates.iterator) yield p)))
     })
     // the following assertions are quite expensive ...
     Debug.assertPostFast(Debug.AC_INTERPOLATION_IMPLICATION_CHECKS, {
@@ -91,7 +93,7 @@ object Interpolator
 
   lazy val assertionProver = new ExhaustiveProver(true, GoalSettings.DEFAULT)
 
-  private def isValid(f : Conjunction) : Boolean = {
+  private def isValid(f : Conjunction, default : Boolean = true) : Boolean = {
     implicit val o = f.order
     val closedF = forall(o sort f.constants, f)
     Timeout.withTimeoutMillis(60000) {
@@ -102,7 +104,7 @@ object Interpolator
       // if a timeout occurs, we assume that the formula was valid ...
       Console.err.println(
         "Warning: could not fully verify correctness of interpolant due to timeout")
-      true
+      default
     }
   }
  
@@ -120,16 +122,26 @@ object Interpolator
     def certConj(fors : Iterable[CertFormula]) : Conjunction =
       conj(for (f <- fors) yield f.toConj)
 
+    val theoryAxioms =
+      certificate.theoryAxioms ++
+      (for (TheoryAxiomInference(axiom, _) <- inferences.iterator) yield axiom)
+    val allCommon =
+      iContext.commonFormulae ++ theoryAxioms
+
     if (!isValid((certConj(iContext.leftFormulae) &
-                  certConj(iContext.commonFormulae)) ==> interpolant) ||
+                  certConj(allCommon)) ==> interpolant,
+                 false) ||
         !isValid(!(certConj(iContext.rightFormulae) &
-                   certConj(iContext.commonFormulae) & interpolant))) {
+                   certConj(allCommon) & interpolant),
+                 false)) {
       println("===================================")
       println("Incorrect interpolant: " + interpolant)
       println("Certificate: " + certificate)
       println("Leading inferences: " + inferences)
       println("Left formulae: " + iContext.leftFormulae)
       println("Right formulae: " + iContext.rightFormulae)
+      println("Common formulae: " + iContext.commonFormulae)
+      println("Theory axioms: " + theoryAxioms)
       println("Partial interpolants: " + iContext.partialInterpolants)
       false
     } else {
@@ -179,19 +191,8 @@ object Interpolator
           (iContext isCommon originalForm) && {
             // check whether any of the predicate literals of the formula can be
             // unified with known literals (from left or right)
-
-            val conj = originalForm.toConj
-            val conjAtoms =
-              if (conj.isNegatedConjunction) {
-                val negConj = conj.negatedConjs(0)
-                atomsIterator(negConj.predConj, false) ++
-                (for (c <- negConj.negatedConjs.iterator;
-                      a <- atomsIterator(c.predConj, true)) yield a)
-              } else {
-                atomsIterator(conj.predConj, true)
-              }
-
-            canMapCommonFormulaToLeft(conjAtoms, originalForm.constants,
+            canMapCommonFormulaToLeft(enumToplevelAtoms(originalForm),
+                                      originalForm.constants,
                                       iContext)
           }
 
@@ -241,7 +242,7 @@ object Interpolator
           case _ => throw new Error("Unexpected partial interpolant")
         }
         
-        val leftPartInter =  PartialInterpolant(origiPartInter.linComb-dec,
+        val leftPartInter =  PartialInterpolant(-origiPartInter.linComb-dec,
                                                 origiPartInter.den,
                                                 PartialInterpolant.Kind.InEqLeft)
         val leftRes =
@@ -254,7 +255,7 @@ object Interpolator
              }) {
           leftRes
         } else {
-          val rightPartInter = PartialInterpolant(-origiPartInter.linComb-dec,
+          val rightPartInter = PartialInterpolant(origiPartInter.linComb-dec,
                                                   origiPartInter.den,
                                                   PartialInterpolant.Kind.InEqLeft)
           val rightRes =
@@ -423,10 +424,10 @@ object Interpolator
       //////////////////////////////////////////////////////////////////////////
 
       case CloseCertificate(contradFors, _) => {
-        //-BEGIN-ASSERTION-/////////////////////////////////////////////////       
+        //-BEGIN-ASSERTION-/////////////////////////////////////////////////////
         Debug.assertInt(AC, contradFors.size == 1 &&
                             contradFors.head.isFalse)
-        //-END-ASSERTION-///////////////////////////////////////////////////
+        //-END-ASSERTION-///////////////////////////////////////////////////////
 
         contradFors.head match {
           case f : CertArithLiteral =>
@@ -735,18 +736,19 @@ object Interpolator
         val (rightEqs, rightOriLit) =
           iContext getPredAtomRewriting CertPredLiteral(true, rightAtom)
 
-        //-BEGIN-ASSERTION-/////////////////////////////////////////////////////
-        Debug.assertInt(AC,
-                        // The following case is currently not handled
-                        !(iContext isCommon leftOriLit) &&
-                        !(iContext isCommon rightOriLit))
-        //-END-ASSERTION-///////////////////////////////////////////////////////
-        
-        val lInterpolation =
-          (iContext isFromLeft leftOriLit, iContext isFromLeft rightOriLit) match {
-            case (true, true) => true
-            case (false, false) => false
-            case _ => true
+        val (leftFromLeft, rightFromLeft, lInterpolation) =
+          (iContext isFromLeft leftOriLit,
+             iContext isCommon leftOriLit,
+           iContext isFromLeft rightOriLit,
+             iContext isCommon rightOriLit) match {
+            case (true,  _,     true,  _)     |
+                 (true,  _,     _,     true)  |
+                 (_,     true,  true,  _)     |
+                 (false, true,  false, true)    => (true,  true,  true)
+            case (false, false, false, false) |
+                 (false, false, _,     true)  |
+                 (_,     true,  false, false)   => (false, false, false)
+            case (l,     false, r,     false)   => (l,     r,     true)
           }
         
         val newContext = if (lInterpolation)
@@ -755,23 +757,29 @@ object Interpolator
                            iContext addRight !result
 
         val subInterpolant =
-          processBranchInferences(remInferences, child, newContext).toConjunction
+          processBranchInferences(remInferences, child,
+                                  newContext).toConjunction
 
-        def computePredInterpolant(lit : CertPredLiteral) : Conjunction =
-          (iContext isFromLeft lit, lInterpolation) match {
+        def computePredInterpolant(lit : CertPredLiteral,
+                                   litFromLeft : Boolean) : Conjunction =
+          (litFromLeft, lInterpolation) match {
             case (true, true) => Conjunction.FALSE
             case (false, false) => Conjunction.TRUE
             case (true, false) => lit.toConj
             case (false, true) => (!lit).toConj
           }
 
-        val leftPredInterpolant = computePredInterpolant(leftOriLit)
-        val rightPredInterpolant = computePredInterpolant(rightOriLit)
+        val leftPredInterpolant =
+          computePredInterpolant(leftOriLit, leftFromLeft)
+        val rightPredInterpolant =
+          computePredInterpolant(rightOriLit, rightFromLeft)
         
         val leftModifierInterpolants =
-          for (eqs <- leftEqs) yield derivePredModifier(eqs, lInterpolation, iContext)
+          for (eqs <- leftEqs)
+          yield derivePredModifier(eqs, lInterpolation, iContext)
         val rightModifierInterpolants =
-          for (eqs <- rightEqs) yield derivePredModifier(eqs, lInterpolation, iContext)
+          for (eqs <- rightEqs)
+          yield derivePredModifier(eqs, lInterpolation, iContext)
         
         val allInterpolantParts =
           leftModifierInterpolants ++ rightModifierInterpolants ++
@@ -783,7 +791,9 @@ object Interpolator
                                         conj(allInterpolantParts)
 
         val constsToQuantify =
-          unquantifiedInterpolant.constants -- iContext.globalConstants -- iContext.parameters
+          unquantifiedInterpolant.constants --
+          iContext.globalConstants --
+          iContext.parameters
         
         val res =
           if (constsToQuantify.isEmpty) {
@@ -797,7 +807,8 @@ object Interpolator
               exists(constsToQuantifySeq, unquantifiedInterpolant)
           }
         
-        LazyConjunction(ReduceWithConjunction(Conjunction.TRUE, extendedOrder)(res))
+        LazyConjunction(ReduceWithConjunction(Conjunction.TRUE, extendedOrder)(
+                                              res))
       }
       
       //////////////////////////////////////////////////////////////////////////
@@ -863,26 +874,35 @@ object Interpolator
       
       case QuantifierInference(qFormula, consts, result, _) => {
         implicit val order = iContext.order
+
+        val fromLeft =
+          (iContext isFromLeft qFormula) ||
+          (iContext isCommon qFormula) && {
+            // check whether any of the predicate literals of the formula can be
+            // unified with known literals (from left or right)
+            canMapCommonFormulaToLeft(enumToplevelAtoms(qFormula),
+                                      qFormula.constants,
+                                      iContext)
+          }
        
         val newContext = (
-          if (iContext isFromLeft qFormula) {
-            iContext addLeft result
-          } else {
-            //-BEGIN-ASSERTION-///////////////////////////////////////////////////
-            Debug.assertInt(AC, iContext isFromRight qFormula)
-            //-END-ASSERTION-/////////////////////////////////////////////////////
-            iContext addRight result
-          }).addConstants(consts.reverse)
+            if (fromLeft)
+              iContext addLeft result
+            else
+              iContext addRight result
+          ).addConstants(consts.reverse)
 
         val totalInter =
-          processBranchInferences(remInferences, child, newContext).toConjunction
+          processBranchInferences(remInferences, child, newContext)
+                                 .toConjunction
 
         LazyConjunction(
-          if (iContext isFromLeft qFormula) {
-            forall(consts.filter(iContext.rightLocalConstants contains _), totalInter)
-          } else {
-            exists(consts.filter(iContext.leftLocalConstants contains _), totalInter)
-          })
+          if (fromLeft)
+            forall(consts.filter(iContext.rightLocalConstants contains _),
+                   totalInter)
+          else
+            exists(consts.filter(iContext.leftLocalConstants contains _),
+                   totalInter))
       }
       
       //////////////////////////////////////////////////////////////////////////
@@ -938,6 +958,19 @@ object Interpolator
     res
   }
 
+  private def enumToplevelAtoms(form : CertFormula)
+                               : Iterator[CertPredLiteral] = {
+    val conj = form.toConj
+    if (conj.isNegatedConjunction) {
+      val negConj = conj.negatedConjs(0)
+      atomsIterator(negConj.predConj, false) ++
+        (for (c <- negConj.negatedConjs.iterator;
+              a <- atomsIterator(c.predConj, true)) yield a)
+    } else {
+      atomsIterator(conj.predConj, true)
+    }
+  }
+
   private def canMapCommonFormulaToLeft
                 (forAtoms : Iterator[CertPredLiteral],
                  consts : Set[ConstantTerm],
@@ -966,7 +999,12 @@ object Interpolator
       else {
         //-BEGIN-ASSERTION-/////////////////////////////////////////////////////
         Debug.assertInt(Interpolator.AC, {
-            Console.err.println("Warning: cannot map formula to left or right")
+            Console.err.println(
+              "Warning: cannot map formula to left or right" +
+              (if (consts.isEmpty)
+                 ""
+               else
+                 " (constants " + (consts mkString ", ") + ")"))
             true
           })
         //-END-ASSERTION-///////////////////////////////////////////////////////

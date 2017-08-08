@@ -78,6 +78,26 @@ object TypeTheory extends Theory {
       f
   }
 
+  /**
+   * Remove redundant type constraints that might occur in the formula
+   * (constraints that are implied by the typing information)
+   */
+  def filterTypeConstraints(f : Conjunction) : Conjunction = {
+    implicit val order = f.order
+
+    val membershipConstraints =
+      for (c <- f.constants.iterator; if c.isInstanceOf[SortedConstantTerm])
+      yield (c.asInstanceOf[SortedConstantTerm].sort membershipConstraint c)
+
+    if (membershipConstraints.hasNext) {
+      val membershipConstraintConj =
+        Conjunction.conj(membershipConstraints, order)
+      ReduceWithConjunction(membershipConstraintConj, order)(f)
+    } else {
+      f
+    }
+  }
+
   private def addResultConstraints(f : Conjunction, negated : Boolean)
                                   (implicit order : TermOrder) : Conjunction = {
     val newNegConj =
@@ -148,6 +168,8 @@ object TypeTheory extends Theory {
 
   //////////////////////////////////////////////////////////////////////////////
 
+  override def toString = "Types"
+
   val axioms = Conjunction.TRUE
   val functionPredicateMapping = List()
   val functionalPredicates : Set[ap.parser.IExpression.Predicate] = Set()
@@ -209,12 +231,12 @@ object TypeTheory extends Theory {
           case sort => {
             val index = -lc.constant
             if (!(terms contains ((index, sort)))) {
-              val chosedPair =
+              val chosenPair =
                 (for (ind <- sort.individuals;
                       pair = (ind, sort);
                       if !(allTerms contains pair))
                  yield pair).headOption
-              for (p@(term, sort) <- chosedPair) {
+              for (p@(term, sort) <- chosenPair) {
                 terms.put((-lc.constant, sort), term)
                 allTerms += p
               }

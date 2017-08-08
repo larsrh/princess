@@ -1392,7 +1392,8 @@ class SimpleAPI private (enableAssert : Boolean,
       doDumpScala {
         println("// createBooleanFunction(...)")
       }
-      createFunction(rawName, argSorts, Sort.Bool, partial, functionalityMode)
+      createFunction(rawName, argSorts, Sort.MultipleValueBool,
+                     partial, functionalityMode)
     })
   
   /**
@@ -2470,9 +2471,12 @@ class SimpleAPI private (enableAssert : Boolean,
           val transitionFors =
             for ((n, f) <- formulaeInProver;
                  if (n < 0 || (names contains n))) yield f.negate
+          val theoryAxioms =
+            currentSimpCertificate.theoryAxioms map (_.toConj)
           val condition =
-            Conjunction.implies(Conjunction.conj(transitionFors ++ List(left),
-                                                 currentOrder),
+            Conjunction.implies(Conjunction.conj(
+                                  transitionFors ++ theoryAxioms ++ List(left),
+                                  currentOrder),
                                 right, currentOrder)
           interpolantImpIsValid(condition)
         }
@@ -2597,9 +2601,11 @@ class SimpleAPI private (enableAssert : Boolean,
         for ((n, f) <- formulaeInProver;
              if (n < 0 || (names.d contains n))) yield f.negate
       val subInts = for (c <- ints.children) yield c.d
+      val theoryAxioms = currentSimpCertificate.theoryAxioms map (_.toConj)
       val condition =
-        Conjunction.implies(Conjunction.conj(transitionFors ++ subInts,
-                                             currentOrder),
+        Conjunction.implies(Conjunction.conj(
+                              transitionFors ++ theoryAxioms ++ subInts,
+                              currentOrder),
                             ints.d, currentOrder)
       interpolantImpIsValid(condition) &&
       ((names.children.iterator zip ints.children.iterator) forall {
@@ -2619,10 +2625,6 @@ class SimpleAPI private (enableAssert : Boolean,
 
   /**
    * Install a theory plugin in the prover.
-   * This is highly experimental functionality.
-   *
-   * (In particular, <code>eval</code> and <code>evalPartial</code> might
-   * sometimes produce strange results in combination with plugins)
    */
   def setupTheoryPlugin(plugin : Plugin) : Unit = {
     doDumpSMT {
@@ -3989,21 +3991,6 @@ class SimpleAPI private (enableAssert : Boolean,
   }
 
   /**
-   * HACK: When constructing proofs, make sure that the given formula only uses
-   * the <code>BitShiftMultiplicationTheory</code>; other theories do not support
-   * proof extraction at the moment.
-   */
-  private def fixMulTheory(f : IFormula) : IFormula =
-    if (constructProofs) {
-      val newF = ap.theories.BitShiftMultiplication convert f
-      theoryCollector(newF)
-      addTheoryAxioms
-      newF
-    } else {
-      f
-    }
-
-  /**
    * In some cases, convert universal quantifiers to existential ones.
    * At the moment, this is in particular necessary when constructing
    * proof for interpolation.
@@ -4048,8 +4035,7 @@ class SimpleAPI private (enableAssert : Boolean,
     formula
   }
 
-  private def toInternal(preF : IFormula) : (Conjunction, Conjunction) = {
-    val f = fixMulTheory(preF)
+  private def toInternal(f : IFormula) : (Conjunction, Conjunction) = {
     val sig = Signature(Set(),
                         existentialConstants,
                         currentOrder.orderedConstants -- existentialConstants,

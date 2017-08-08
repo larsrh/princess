@@ -250,19 +250,19 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
         case block : FunctionDecls =>
           for (decl <- block.listdeclfunc_.iterator)
             collectDeclFunC(decl,
-              (id, sort) => env.addConstant(sort newConstant id,
+              (id, sort) => env.addConstant(toMVBool(sort) newConstant id,
                                             Environment.NullaryFunction,
                                             ()))
         case block : ExConstants =>
           for (decl <- block.listdeclconstantc_.iterator)
             collectDeclConstantC(decl,
-              (id, sort) => env.addConstant(sort newConstant id,
+              (id, sort) => env.addConstant(toMVBool(sort) newConstant id,
                                             Environment.Existential,
                                             ()))
         case block : UniConstants =>
           for (decl <- block.listdeclconstantc_.iterator)
             collectDeclConstantC(decl,
-              (id, sort) => env.addConstant(sort newConstant id,
+              (id, sort) => env.addConstant(toMVBool(sort) newConstant id,
                                             Environment.Universal,
                                             ()))
         case block : PredDecls =>
@@ -334,7 +334,7 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
                        "Illegal options for function: " + (strs mkString " "))
         }
 
-        val fun = MonoSortedIFunction(decl.ident_, argSorts, resSort,
+        val fun = MonoSortedIFunction(decl.ident_, argSorts, toMVBool(resSort),
                                       partial, relational)
 
         env.addFunction(fun, ())
@@ -349,20 +349,6 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
 
   //////////////////////////////////////////////////////////////////////////////
 
-  private def determineArity(args : FormalArgsC) : Int = args match {
-    case args : FormalArgs => {
-      //-BEGIN-ASSERTION-///////////////////////////////////////////////////////
-      Debug.assertInt(ApParser2InputAbsy.AC,
-        Logic.forall(for (at <- args.listargtypec_.iterator)
-                     yield (at match {
-                              case at : ArgType => at.type_.isInstanceOf[TypeInt]
-                              case at : NamedArgType => at.type_.isInstanceOf[TypeInt]
-                            })))
-      //-END-ASSERTION-/////////////////////////////////////////////////////////
-      args.listargtypec_.size
-    }
-  }
-  
   private def determineSorts(args : FormalArgsC) : Seq[Sort] = args match {
     case args : FormalArgs =>
       for (at <- args.listargtypec_) yield at match {
@@ -436,6 +422,11 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
     }
     case t : TypeIdent =>
       env lookupSort t.ident_
+  }
+
+  private def toMVBool(s : Sort) : Sort = s match {
+    case Sort.Bool => Sort.MultipleValueBool
+    case s => s
   }
 
   private def collectSingleVarDecl(decl : DeclSingleVarC) : Unit = decl match {
@@ -774,7 +765,11 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
   private def asFormula(expr : (IExpression, Sort)) : IFormula = expr match {
     case (expr : IFormula, _) =>
       expr
-    case (t : ITerm, Sort.Bool) =>
+    case (IIntLit(IdealInt.ZERO), Sort.Bool | Sort.MultipleValueBool) =>
+      i(true)
+    case (IIntLit(_), Sort.Bool | Sort.MultipleValueBool) =>
+      i(false)
+    case (t : ITerm, Sort.Bool | Sort.MultipleValueBool) =>
       eqZero(t)
     case (expr, sort) => 
       throw new Parser2InputAbsy.TranslationException(
@@ -782,6 +777,8 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
   }
   
   private def asTerm(expr : (IExpression, Sort)) : ITerm = expr match {
+    case (expr : ITerm, Sort.MultipleValueBool) =>
+      ite(eqZero(expr), i(0), i(1))
     case (expr : ITerm, _) =>
       expr
     case (IBoolLit(true), _) =>
@@ -850,6 +847,9 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
         Some(Sort.Integer)
       case (s1, s2) if s1 == s2 =>
         Some(s1)
+      case (Sort.Bool, Sort.MultipleValueBool) |
+           (Sort.MultipleValueBool, Sort.Bool) =>
+        Some(Sort.MultipleValueBool)
       case _ =>
         None
     }
@@ -882,7 +882,10 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
     // add the bound variables to the environment and record their number
     var quantNum : Int = 0
     collectDeclBinder(f.declbinder_,
-                      (id, sort) => { quantNum = quantNum + 1; env.pushVar(id, sort) })
+                      (id, sort) => {
+                        quantNum = quantNum + 1
+                        env.pushVar(id, toMVBool(sort))
+                      })
 
     def body(matrix : IFormula) = {
       val sorts = for (_ <- 0 until quantNum) yield env.popVar
@@ -897,7 +900,6 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
 
   //////////////////////////////////////////////////////////////////////////////
   
-  // TODO: check argument sorts
   private def translateFunctionApp(name : String,
                                    args : Seq[(IExpression, Sort)])
                                   : (IExpression, Sort) =

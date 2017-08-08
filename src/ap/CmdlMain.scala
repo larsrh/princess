@@ -32,12 +32,13 @@ import ap.parameters.{GlobalSettings, Param}
 import ap.parser.{SMTLineariser, TPTPLineariser, PrincessLineariser,
                   IFormula, IExpression,
                   IBinJunctor, IInterpolantSpec, INamedPart, IBoolLit, PartName,
-                  Internal2InputAbsy, Simplifier, SMTParser2InputAbsy, IFunction}
+                  Internal2InputAbsy, Simplifier, SMTParser2InputAbsy, IFunction,
+                  LineariseVisitor}
 import ap.util.{Debug, Seqs, Timeout}
 
 object CmdlMain {
 
-  val version = "build 2017-01-21"
+  val version = "release 2017-07-17"
 
   def printGreeting = {
     println("________       _____")                                 
@@ -220,7 +221,7 @@ object CmdlMain {
                                    settings : GlobalSettings,
                                    prover : Prover)
                                  (implicit format : Param.InputFormat.Value) = {
-    Console.err.println
+    println
     doPrintTextCertificate(cert,
                            prover.getFormulaParts,
                            prover.getPredTranslation,
@@ -353,84 +354,25 @@ object CmdlMain {
             
             val prover = if (Param.MULTI_STRATEGY(settings)) {
               import ParallelFileProver._
-              
-              /*
-              val s1 = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, true)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.Maximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, true)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, false)
-                s
-              }
-              val s2 = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, false)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.Maximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, false)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, false)
-                s
-              }
-              val s3 = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, true)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.AllMaximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, true)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, true)
-                s
-              }
-              
-              val strategies =
-                List((s1, true, "+reverseFunctionalityPropagation -tightFunctionScopes"),
-                     (s2, false, "-genTotalityAxioms -tightFunctionScopes"),
-                     (s3, true, "-triggerStrategy=allMaximal +reverseFunctionalityPropagation"))
-              */
-                
-              val S = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, false)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.Maximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, false)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, false)
-                s
-              }
-              val J = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, true)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.AllMaximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, true)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, true)
-                s
-              }
-              val P = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, true)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.AllMaximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, false)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, false)
-                s
-              }
-              val Y = {
-                var s = baseSettings
-                s = Param.GENERATE_TOTALITY_AXIOMS.set(s, false)
-                s = Param.TRIGGER_STRATEGY.set(s, Param.TriggerStrategyOptions.Maximal)
-                s = Param.REVERSE_FUNCTIONALITY_PROPAGATION.set(s, true)
-                s = Param.TIGHT_FUNCTION_SCOPES.set(s, false)
-                s
-              }
-              
-              val strategies =
-                List(Configuration(S, false, "-genTotalityAxioms -tightFunctionScopes", Long.MaxValue),
-                     Configuration(J, true, "-triggerStrategy=allMaximal +reverseFunctionalityPropagation", Long.MaxValue),
-                     Configuration(P, true, "-triggerStrategy=allMaximal -tightFunctionScopes", Long.MaxValue),
-                     Configuration(Y, false, "-genTotalityAxioms +reverseFunctionalityPropagation -tightFunctionScopes", Long.MaxValue))
 
-              new ParallelFileProver(reader,
-                                     Param.TIMEOUT(settings),
-                                     true,
-                                     userDefStoppingCond,
-                                     strategies,
-                                     2)
+              def prelPrinter(p : Prover) : Unit = {
+                Console.err.println
+                printResult(p, baseSettings)
+                Console.err.println
+              }
+
+              ParallelFileProver(reader,
+                                 Param.TIMEOUT(settings),
+                                 true,
+                                 userDefStoppingCond,
+                                 baseSettings,
+                                 cascStrategies2016,
+                                 1,
+                                 3,
+                                 Param.COMPUTE_UNSAT_CORE(settings) ||
+                                   Param.PRINT_CERTIFICATE(settings) ||
+                                   Param.PRINT_DOT_CERTIFICATE_FILE(settings) != "",
+                                 prelPrinter _)
             } else {
               new IntelliFileProver(reader(),
                                     Param.TIMEOUT(settings),
@@ -550,7 +492,7 @@ object CmdlMain {
                   settings : GlobalSettings)
                  (implicit format : Param.InputFormat.Value) = format match {
     case Param.InputFormat.SMTLIB => prover.result match {
-              case Prover.Proof(tree) => {
+              case Prover.Proof(tree, _) => {
                 println("unsat")
                 if (Param.PRINT_TREE(settings)) Console.withOut(Console.err) {
                   println
@@ -558,7 +500,7 @@ object CmdlMain {
                   println(tree)
                 }
               }
-              case Prover.ProofWithModel(tree, model) => {
+              case Prover.ProofWithModel(tree, _, model) => {
                 println("unsat")
                 if (Param.PRINT_TREE(settings)) Console.withOut(Console.err) {
                   println
@@ -621,9 +563,9 @@ object CmdlMain {
     }
       
     case _ => prover.result match {
-              case Prover.Proof(tree) => {
+              case Prover.Proof(tree, constraint) => {
                 println("VALID")
-                if (!tree.closingConstraint.isTrue ||
+                if (!constraint.isTrue ||
                     Param.MOST_GENERAL_CONSTRAINT(settings)) {
                   println
                   println("Under the " +
@@ -631,7 +573,7 @@ object CmdlMain {
                              "most-general "
                            else
                              "") + "constraint:")
-                  printFormula(tree.closingConstraint)
+                  printFormula(constraint)
                 }
 //                Console.err.println("Number of existential constants: " +
 //                                    existentialConstantNum(tree))
@@ -641,9 +583,9 @@ object CmdlMain {
                   println(tree)
                 }
               }
-              case Prover.ProofWithModel(tree, model) => {
+              case Prover.ProofWithModel(tree, constraint, model) => {
                 println("VALID")
-                if (!tree.closingConstraint.isTrue ||
+                if (!constraint.isTrue ||
                     Param.MOST_GENERAL_CONSTRAINT(settings)) {
                   println
                   println("Under the " +
@@ -651,16 +593,17 @@ object CmdlMain {
                              "most-general "
                            else
                              "") + "constraint:")
-                  printFormula(tree.closingConstraint)
+                  printFormula(constraint)
                 }
 //                Console.err.println("Number of existential constants: " +
 //                                    existentialConstantNum(tree))
                 model match {
                   case IBoolLit(true) => // nothing
-                  case _ if ({
-                               val c = tree.closingConstraint
-                               c.arithConj.positiveEqs.size == c.size
-                              }) => // nothing
+                  case _ if (
+                          LineariseVisitor(constraint, IBinJunctor.And) forall {
+                            case IExpression.Eq(_, _) => true
+                            case _ => false
+                          }) => // nothing
                   case _ => {
                     println
                     println("Concrete witness:")

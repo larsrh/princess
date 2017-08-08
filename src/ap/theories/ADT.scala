@@ -296,6 +296,22 @@ object ADT {
       }
   }
 
+  /**
+   * Extractor recognising the <code>X_size</code> functions of
+   * any ADT theory.
+   */
+  object TermSize {
+    def unapply(fun : IFunction) : Option[(ADT, Int)] =
+      (TheoryRegistry lookupSymbol fun) match {
+        case Some(t : ADT) if t.termSize != null =>
+          (t.termSize indexOf fun) match {
+            case -1 => None
+            case num => Some((t, num))
+          }
+          case _ => None
+      }
+  }
+
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -938,8 +954,8 @@ class ADT (sortNames : Seq[String],
                            for (i <- 0 until varNum) yield l(v(i)),
                            shiftSubst(node))
 
-    val sortConstraint = sorts(sortNum) membershipConstraint node
-    exists(varNum, conj(a ++ b ++ List(shiftSubst(sortConstraint))))
+//    val sortConstraint = sorts(sortNum) membershipConstraint node
+    exists(varNum, conj(a ++ b /* ++ List(shiftSubst(sortConstraint)) */))
   }
 
   private def quanCtorCases(sortNum : Int, node : LinearCombination)
@@ -1051,6 +1067,7 @@ class ADT (sortNames : Seq[String],
                     newConjuncts += (a.head === a.last)
                     Iterator.empty
                   } else {
+// TODO: factor out common depth/size and sort constraints
                     newConjuncts += ctorDisjunction(sortNum, a.head, a.last)
                     Iterator single a
                   }
@@ -1059,8 +1076,9 @@ class ADT (sortNames : Seq[String],
                   if (!(allGuardedNodes contains a.head)) {
                     // for completeness, we need to add a predicate about
                     // the possible constructors of the considered term
-// TODO: pull out common depth predicates
+// TODO: factor out common depth/size predicates
                     newConjuncts += disj(quanCtorCases(sortNum, a.head))
+                    newConjuncts += sorts(sortNum) membershipConstraint a.head
                   }
 
                   Iterator single a
@@ -1153,11 +1171,11 @@ class ADT (sortNames : Seq[String],
           implicit val order = goal.order
           val predFacts = goal.facts.predConj
 
-          val ctorDefinedCons = new MHashSet[LinearCombination]
+          val ctorDefinedCons = new MHashSet[(LinearCombination, Sort)]
 
           for (a <- predFacts.positiveLits) (adtPreds get a.pred) match {
-            case Some(_ : ADTCtorPred) =>
-              ctorDefinedCons += a.last
+            case Some(ADTCtorPred(_, sortNum, _)) =>
+              ctorDefinedCons += ((a.last, sorts(sortNum)))
             case _ =>
               // nothing
           }
@@ -1169,8 +1187,8 @@ class ADT (sortNames : Seq[String],
             for (a <- predFacts.positiveLits.iterator ++
                       predFacts.negativeLits.iterator;
                  argSorts = SortedPredicate.argumentSorts(a.pred, a);
-                 (lc, sort) <- a.iterator zip argSorts.iterator;
-                 if !(ctorDefinedCons contains lc);
+                 p@(lc, sort) <- a.iterator zip argSorts.iterator;
+                 if !(ctorDefinedCons contains p);
                  if (nonEnumSorts contains sort))
             yield (lc, sort)
 
@@ -1195,8 +1213,15 @@ class ADT (sortNames : Seq[String],
 //              for (c <- quanCtorCases(sortNum, lc))
 //              yield List(Plugin.AddFormula(!(PresburgerTools toPrenex c)))))
 
+            val assumptions : Seq[Formula] = sort.cardinality match {
+              case Some(card) if !lc.isConstant =>
+                List(lc >= 0, lc < card)
+              case _ =>
+                List()
+            }
+
             List(Plugin.AxiomSplit(
-              List(), // TODO
+              assumptions,
               for (c <- quanCtorCases(sortNum, lc))
                 yield (PresburgerTools toPrenex c, List()),
               ADT.this))
