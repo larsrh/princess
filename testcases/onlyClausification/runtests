@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# tests only runnable with unit resolution
+# tests only runnable with unit resolution and clausification
 
 PRI=../../princess
 

@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2009-2011 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2009-2017 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -97,6 +97,19 @@ object LinearCombination {
       new LinearCombination1(IdealInt.ONE, t, IdealInt.ZERO, order)
   }
   
+  /**
+   * Extractor applying to <code>LinearCombination</code> that are just a
+   * single term with coefficient <code>1</code>.
+   */
+  object SingleTerm {
+    def unapply(lc : LinearCombination) : Option[Term] = lc match {
+      case lc : LinearCombination1 if lc.coeff0.isOne && lc.constant.isZero =>
+        Some(lc.term0)
+      case _ =>
+        None
+    }
+  }
+
   def apply(coeff : IdealInt, t : Term,
             order : TermOrder) : LinearCombination = t match {
     case t : LinearCombination => {
@@ -130,6 +143,16 @@ object LinearCombination {
     case IdealInt.ONE => ONE
     case IdealInt.MINUS_ONE => MINUS_ONE
     case _ => new LinearCombination0 (c)
+  }
+
+  /**
+   * Extractor applying to <code>LinearCombination</code> that are constant.
+   */
+  object Constant {
+    def unapply(lc : LinearCombination) : Option[IdealInt] = lc match {
+      case lc : LinearCombination0 => Some(lc.constant)
+      case _ => None
+    }    
   }
   
   /**
@@ -743,7 +766,13 @@ abstract sealed class LinearCombination (val order : TermOrder)
    */
   def scaleAndAdd(coeff : IdealInt, const : IdealInt) : LinearCombination
 
-  def * (that : LinearCombination) : LinearCombination = (this.pairSeq, that.pairSeq) match {
+  /**
+   * Multiple two linear combinations. One of the arguments has to be
+   * constant, otherwise the method will raise an
+   * <code>IllegalArgumentException</code>.
+   */
+  def * (that : LinearCombination) : LinearCombination = (this.pairSeq,
+                                                          that.pairSeq) match {
     case (_, Seq()) | (Seq(), _) => LinearCombination.ZERO
     case (_, Seq((coeff, OneTerm))) => this scale coeff
     case (Seq((coeff, OneTerm)), _) => that scale coeff

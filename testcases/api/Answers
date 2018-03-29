@@ -77,7 +77,7 @@ b = -5
 
 -- Boolean functions and triggers
 Sat
-Partial model: {true -> 0, false -> 5, c2 -> 5, c1 -> 100, c0 -> 115, r(5, 1) -> 0, r(1, 5) -> 0, p1 -> true, p0 -> true}
+Partial model: {true -> 0, false -> 115, c2 -> 5, c1 -> 100, c0 -> 115, r(5, 1) -> 0, r(1, 5) -> 0, p1 -> true, p0 -> true}
 Valid
 
 -- Existential constants
@@ -203,8 +203,12 @@ Sat
 SimpleAPITest11
 Inconclusive
 0
+
+interpolation-bug.scala
 0: Unsat
 1: Vector(rootjthen_fwd, false)
+
+scope-bug.scala
 0: Sat
 1: Sat
 2: Sat
@@ -218,23 +222,35 @@ Inconclusive
 11: 1
 12: 3
 13: -5
+
+incrementality-bug.scala
 59: Sat
 72: 0
 73: Invalid
+
+getConstraint-bug.scala
 39: Valid
 40: true
+
+TheoryTest.scala
 Sat
 List((Vector(0, 1),2), (Vector(1, 2),3))
 Sat
 List((Vector(0, 2),1), (Vector(0, 1),2), (Vector(1, 2),3))
 Unsat
 Valid
+
+TheoryTest2.scala
 Unsat
 Inconclusive
 {c -> 0, b -> 0, a -> 0, mul(0, 0) -> 0}
 Unsat
 Unsat
+
+TheoryTest3.scala
 Unsat
+
+TypeTests.scala
 Starting
 \exists int v0, v1; v1 = x + v0
 Sat
@@ -260,6 +276,8 @@ Unsat
 Unsat
 Unsat
 Finished
+
+nonlinear.scala
 0: Sat
 {c1 -> 1, c0 -> 4}
 1: Sat
@@ -269,8 +287,12 @@ Finished
 {c0 -> -1}
 4: Valid
 5: Valid
+
+nonlinearInterpolation.scala
 Unsat
 Vector(!((-3 + c1) = 0))
+
+division.scala
 0: Sat
 {c0 -> 8}
 1: Sat
@@ -280,19 +302,22 @@ Vector(!((-3 + c1) = 0))
 3: Invalid
 {c1 -> 2, c0 -> 1}
 4: Valid
-x - y >= 1 & y + -1*50 >= 1
-Sat
-Unsat
+
+deadlock.scala
 starting
 Sat
 getting model ...
 {}
 finished
+
+exception.scala
 starting
 x
 {}
 y
 finished
+
+incremental.scala
 starting
 Sat
 {z -> 3, y -> -1, x -> 0, a -> false}
@@ -302,6 +327,8 @@ Sat
 Sat
 {z -> 5, y -> 1, x -> 2, a -> true}
 finished
+
+divmodprint.scala
 starting
 (div x 5)
 (div x (- 5))
@@ -313,6 +340,8 @@ starting
 (mod (* (- 1) x) (- 5))
 (_eps ((var0 Int)) (and (<= 0 var0) (or (= var0 x) (= (* (- 1) var0) x))))
 finished
+
+ADTTest.scala
 Vector(nil)
 Sat
 {nil -> 1, c2 -> 2, c1 -> 0, c0 -> 42, list_depth(2) -> 1, list_depth(1) -> -1, list_depth(0) -> 0, list_ctor(2) -> 1, list_ctor(1) -> 0, list_ctor(0) -> 1, tail(2) -> 0, tail(0) -> 1, head(2) -> 42, head(0) -> 0, cons(42, 0) -> 2, cons(0, 1) -> 0}
@@ -326,6 +355,8 @@ Valid
 Unsat
 Valid
 Invalid
+
+ADTTest2.scala
 Unsat
 Vector(!(list_ctor(x) = 0))
 Unsat
@@ -338,6 +369,8 @@ Valid
 Vector(((nil + -1 * x) = 0), ((y + -1 * x) = 0))
 Valid
 Vector(((cons(1, cons(2, nil)) + -1 * x) = 0), ((y + -1 * x) = 0))
+
+ADTTest3.scala
 Vector(red, nil)
 Test 1
 Sat
@@ -458,15 +491,75 @@ None
 Test 30
 Valid
 Invalid
+
+ADTTest4.scala
 Test 1
 Sat
 cons(red, cons(green, nil))
 Sat
 cons(red, cons(green, cons(green, cons(green, cons(green, cons(green, nil))))))
 Unsat
+
+pred-simplify.scala
 starting
 c = 4 & !p
 p | c = 4
 finished
+
+empty-stack-bug.scala
 Sat
 0
+
+TestModuloArithmetic.scala
+Test 1
+Sat
+{b2 -> 0, b1 -> 13}
+b1 = mod_cast(0, 255, 13)
+Test 2
+Sat
+{w2 -> 0, w1 -> 13}
+Test 3
+Sat
+h1 = mod_cast(0, 65535, 11007)
+Unsat
+Test 4
+Valid
+Test 5
+Valid
+Test 6
+Valid
+Test 7
+Unsat
+Vector(((x + -1 * mod_cast(0, 1, 1)) = 0), ((-1 + y) >= 0))
+Test 8
+\exists int v0; (v0 >= 0 & 3 >= v0 & bv_mul(2, x, v0) = 1.\as[bv[2]])
+x = 3 | x = 1
+Valid
+Test 9
+Unsat
+Vector(a.\as[int] - b.\as[int] >= 126 | a >= 254 | (b.\as[int] - a.\as[int] = 130 & a >= 0), b >= 130, b >= c)
+
+TreeInterpolation.scala
+Unsat
+List(1, 3, 5, 10, 20, 40)
+false
+   (d = 0)
+      ((-1 + b) = 0)
+      ((1 + (d + -1 * c)) = 0)
+   ((-5 + e) = 0)
+
+TestFrame.scala
+Sat
+Unsat
+Sat
+Inconclusive
+Unsat
+x - y >= 2
+
+readSMTLIB.scala
+x - y >= 1 & y + -1*50 >= 1
+Sat
+Unsat
+x - y >= 1 & y + -1*50 >= 1
+Sat
+Unsat

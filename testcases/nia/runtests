@@ -62,7 +62,12 @@ TESTS="division.pri \
        simplify9.pri \
        subsumptionExample.pri \
        simpleTermination.pri \
-       aproveSMT809443464904014753.smt2"
+       aproveSMT809443464904014753.smt2 \
+       bv-square.pri \
+       bv-quadratic-eq.pri \
+       mult-diff.pri \
+       mult-model.pri \
+       shift.pri"
 
 $PRI "$@" $TESTS 2>&1
 

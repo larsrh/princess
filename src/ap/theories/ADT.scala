@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2016-2017 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2016-2018 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -36,6 +36,7 @@ import ap.types.{Sort, ProxySort, MonoSortedIFunction, SortedPredicate,
 import ap.util.{Debug, UnionSet, LazyMappedSet, Combinatorics}
 import ap.proof.theoryPlugins.Plugin
 import ap.proof.goal.Goal
+import ap.parameters.{Param, ReducerSettings}
 
 import scala.collection.mutable.{HashMap => MHashMap, ArrayBuffer,
                                  HashSet => MHashSet, Map => MMap,
@@ -280,6 +281,35 @@ object ADT {
   }
 
   //////////////////////////////////////////////////////////////////////////////
+
+  /**
+   * Extractor recognising the constructors of any ADT theory.
+   * The extractor will produce the adt, and the index of the constructor.
+   */
+  object Constructor {
+    def unapply(fun : IFunction) : Option[(ADT, Int)] =
+      (TheoryRegistry lookupSymbol fun) match {
+        case Some(t : ADT) =>
+          for (num <- t.constructors2Index get fun)
+          yield (t, num)
+        case _ => None
+      }
+  }
+
+  /**
+   * Extractor recognising the selectors of any ADT theory.
+   * The extractor will produce the adt, the index of the constructor,
+   * and the index of the selected constructor argument.
+   */
+  object Selector {
+    def unapply(fun : IFunction) : Option[(ADT, Int, Int)] =
+      (TheoryRegistry lookupSymbol fun) match {
+        case Some(t : ADT) =>
+          for ((num1, num2) <- t.selectors2Index get fun)
+          yield (t, num1, num2)
+        case _ => None
+      }
+  }
 
   /**
    * Extractor recognising the <code>X_ctor</code> functions of
@@ -609,6 +639,9 @@ class ADT (sortNames : Seq[String],
 
   private val constructorsSet : Set[IFunction] = constructors.toSet
 
+  private val constructors2Index : Map[IFunction, Int] =
+    constructors.iterator.zipWithIndex.toMap
+
   /**
    * The selectors of the ADT
    */
@@ -620,6 +653,11 @@ class ADT (sortNames : Seq[String],
                                      argSort,
                                      true, false)
      }).toIndexedSeq
+
+  private val selectors2Index : Map[IFunction, (Int, Int)] =
+    (for ((sels, ind1) <- selectors.iterator.zipWithIndex;
+          (sel, ind2) <- sels.iterator.zipWithIndex)
+     yield (sel -> (ind1, ind2))).toMap
 
   /**
    * Function symbols representing the index of the head symbol of a
@@ -834,9 +872,12 @@ class ADT (sortNames : Seq[String],
     implicit val _ = order
     val after = preprocessHelp(f, false, Set())
 //println(" -> " + after)
+    val reducerSettings =
+      Param.FUNCTIONAL_PREDICATES.set(ReducerSettings.DEFAULT,
+                                      functionalPredicates)
     val after2 = ReduceWithConjunction(Conjunction.TRUE,
-                                       functionalPredicates,
-                                       order)(after)
+                                       order,
+                                       reducerSettings)(after)
 //println(" -> " + after2)
 //println
    after2
@@ -1154,9 +1195,8 @@ class ADT (sortNames : Seq[String],
   override def isSoundForSat(
          theories : Seq[Theory],
          config : Theory.SatSoundnessConfig.Value) : Boolean =
-    theories.size == 1 &&
-    (Set(Theory.SatSoundnessConfig.Elementary,
-         Theory.SatSoundnessConfig.Existential) contains config)
+    Set(Theory.SatSoundnessConfig.Elementary,
+        Theory.SatSoundnessConfig.Existential) contains config
 
   //////////////////////////////////////////////////////////////////////////////
 

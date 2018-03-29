@@ -51,18 +51,18 @@ object SMTParser2InputAbsy {
     def toSort : TSort
   }
   case object SMTBool                              extends SMTType {
-    def toSort = TSort.Bool
+    def toSort = TSort.MultipleValueBool
   }
   case object SMTInteger                           extends SMTType {
     def toSort = TSort.Integer
   }
   case class  SMTArray(arguments : List[SMTType],
                        result : SMTType)           extends SMTType {
-    def toSort = TSort.Integer // TODO
+    def toSort = SimpleArray(arguments.size).sort
   }
   case class SMTBitVec(width : Int)                extends SMTType {
+    def toSort = ModuloArithmetic.UnsignedBVSort(width)
     val modulus = IdealInt(2) pow width
-    def toSort = TSort.Integer // TODO
   }
   case class SMTADT(adt : ADT, sortNum : Int)      extends SMTType {
     def toSort = adt sorts sortNum
@@ -71,7 +71,7 @@ object SMTParser2InputAbsy {
   case class SMTUnint(sort : TSort)                extends SMTType {
     def toSort = sort
     override def toString = sort.name
-  }  
+  }
 
   case class SMTFunctionType(arguments : List[SMTType],
                              result : SMTType)
@@ -653,6 +653,40 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
        }
      })
 
+  private def importProverSymbol(name : String) : Boolean = {
+    import ap.types.SortedConstantTerm
+    import SMTLineariser.{sort2SMTType, functionTypeFromSort}
+
+    incremental &&
+    ((reusedSymbols get name) match {
+       case None =>
+         false
+       case Some(c : ConstantTerm) => {
+         env.addConstant(c, Environment.NullaryFunction,
+                         sort2SMTType(SortedConstantTerm sortOf c)._1)
+         true
+       }
+       case Some(f : IFunction) => functionTypeFromSort(f) match {
+         case Some(t) => {
+           env.addFunction(f, t)
+           true
+         }
+         case None => {
+           warn("cannot reconstruct type of symbol " + name)
+           false
+         }
+       }
+       case Some(p : Predicate) => {
+         env.addPredicate(p, ())
+         true
+       }
+       case _ => {
+         warn("cannot handle symbol " + name)
+         false
+       }
+     })
+  }
+
   //////////////////////////////////////////////////////////////////////////////
 
   /**
@@ -1131,7 +1165,6 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
       //////////////////////////////////////////////////////////////////////////
 
       case cmd : FunctionDefCommand => {
-        // Functions are always declared to have integer inputs and outputs
         val name = asString(cmd.symbol_)
         val args : Seq[SMTType] = 
           for (sortedVar <- cmd.listesortedvarc_)
@@ -1151,7 +1184,7 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
 
         // use a real function
         val f = MonoSortedIFunction(name, args map (_.toSort), resType.toSort,
-                                    true, true)
+                                    true, !args.isEmpty)
         env.addFunction(f, SMTFunctionType(args.toList, resType))
     
         if (inlineDefinedFuns && !neverInline(body._1)) {
@@ -1893,7 +1926,8 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
         } else addAxiom(t match {
           case SMTBool => {
             val f = new MonoSortedIFunction(letVarName(name),
-                                            List(TSort.Integer), TSort.Bool,
+                                            List(TSort.Integer),
+                                            TSort.MultipleValueBool,
                                             true, false)
             env.addFunction(f, SMTFunctionType(List(SMTInteger), SMTBool))
 
@@ -2088,7 +2122,13 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
     case PlainSymbol("mod") => {
       checkArgNum("mod", 2, args)
       val Seq(num, denom) = for (a <- args) yield asTerm(translateTerm(a, 0))
-      (mulTheory.eMod(num, denom), SMTInteger)
+/*      denom match {
+        case IIntLit(denomVal) if denomVal.signum > 0 =>
+          (ModuloArithmetic.cast2Interval(IdealInt.ZERO, denomVal - 1, num),
+           SMTInteger)
+        case denom => */
+          (mulTheory.eMod(num, denom), SMTInteger)
+//      }
     }
 
     case PlainSymbol("abs") => {
@@ -2130,16 +2170,16 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
 
     case IndexedSymbol(BVDecLiteral(value), width) => {
       val t = SMTBitVec(width.toInt)
-      (ModuloArithmetic.mod_cast(t.modulus, IdealInt(value)), t)
+      (ModuloArithmetic.cast2Sort(t.toSort, IdealInt(value)), t)
     }
 
     case PlainSymbol("concat") => {
       checkArgNum("concat", 2, args)
       val a0@(transArg0, type0) = translateTerm(args(0), 0)
       val a1@(transArg1, type1) = translateTerm(args(1), 0)
-      val (mod0, width0) = extractBVModulusWidth("concat", type0, args(0))
-      val (mod1, width1) = extractBVModulusWidth("concat", type1, args(1))
-      (ModuloArithmetic.mod_concat(i(mod0), i(mod1), asTerm(a0), asTerm(a1)),
+      val width0 = extractBVWidth("concat", type0, args(0))
+      val width1 = extractBVWidth("concat", type1, args(1))
+      (ModuloArithmetic.bv_concat(i(width0), i(width1), asTerm(a0), asTerm(a1)),
        SMTBitVec(width0 + width1))
     }
 
@@ -2148,88 +2188,105 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
       val begin = beginStr.toInt
       val end = endStr.toInt
       val a0@(transArg0, type0) = translateTerm(args(0), 0)
-      val (_, width0) = extractBVModulusWidth("extract", type0, args(0))
+      val width0 = extractBVWidth("extract", type0, args(0))
       val resType = SMTBitVec(begin - end + 1)
-      (ModuloArithmetic.mod_extract(i(SMTBitVec(width0 - begin - 1).modulus),
-                                    i(resType.modulus),
-                                    i(SMTBitVec(end).modulus),
-                                    asTerm(a0)),
+      (ModuloArithmetic.bv_extract(i(width0 - begin - 1),
+                                   i(begin - end + 1),
+                                   i(end),
+                                   asTerm(a0)),
        resType)
     }
 
     case PlainSymbol("bvnot") =>
-      translateBVUnaryOp("bvnot", ModuloArithmetic.mod_not, args)
+      translateBVUnaryOp("bvnot", ModuloArithmetic.bv_not, args)
     case PlainSymbol("bvneg") =>
-      translateBVUnaryOp("bvneg", ModuloArithmetic.mod_neg, args)
+      translateBVUnaryOp("bvneg", ModuloArithmetic.bv_neg, args)
 
     case PlainSymbol("bvand") =>
-      translateBVBinOp("bvand",  ModuloArithmetic.mod_and, args)
+      translateBVBinOp("bvand",  ModuloArithmetic.bv_and, args)
     case PlainSymbol("bvor") =>
-      translateBVBinOp("bvor",   ModuloArithmetic.mod_or, args)
+      translateBVBinOp("bvor",   ModuloArithmetic.bv_or, args)
     case PlainSymbol("bvadd") =>
-      translateBVBinOp("bvadd",  ModuloArithmetic.mod_add, args)
+      translateBVBinOp("bvadd",  ModuloArithmetic.bv_add, args)
     case PlainSymbol("bvsub") =>
-      translateBVBinOp("bvsub",  ModuloArithmetic.mod_sub, args)
+      translateBVBinOp("bvsub",  ModuloArithmetic.bv_sub, args)
     case PlainSymbol("bvmul") =>
-      translateBVBinOp("bvmul",  ModuloArithmetic.mod_mul, args)
+      translateBVBinOp("bvmul",  ModuloArithmetic.bv_mul, args)
     case PlainSymbol("bvudiv") =>
-      translateBVBinOp("bvudiv", ModuloArithmetic.mod_udiv, args)
+      translateBVBinOp("bvudiv", ModuloArithmetic.bv_udiv, args)
     case PlainSymbol("bvsdiv") =>
-      translateBVBinOp("bvsdiv", ModuloArithmetic.mod_sdiv, args)
+      translateBVBinOp("bvsdiv", ModuloArithmetic.bv_sdiv, args)
     case PlainSymbol("bvurem") =>
-      translateBVBinOp("bvurem", ModuloArithmetic.mod_urem, args)
+      translateBVBinOp("bvurem", ModuloArithmetic.bv_urem, args)
     case PlainSymbol("bvsrem") =>
-      translateBVBinOp("bvsrem", ModuloArithmetic.mod_srem, args)
+      translateBVBinOp("bvsrem", ModuloArithmetic.bv_srem, args)
     case PlainSymbol("bvsmod") =>
-      translateBVBinOp("bvsmod", ModuloArithmetic.mod_smod, args)
+      translateBVBinOp("bvsmod", ModuloArithmetic.bv_smod, args)
     case PlainSymbol("bvshl") =>
-      translateBVBinOp("bvshl",  ModuloArithmetic.mod_shl, args)
+      translateBVBinOp("bvshl",  ModuloArithmetic.bv_shl, args)
     case PlainSymbol("bvlshr") =>
-      translateBVBinOp("bvlshr", ModuloArithmetic.mod_lshr, args)
+      translateBVBinOp("bvlshr", ModuloArithmetic.bv_lshr, args)
     case PlainSymbol("bvashr") =>
-      translateBVBinOp("bvashr", ModuloArithmetic.mod_ashr, args)
+      translateBVBinOp("bvashr", ModuloArithmetic.bv_ashr, args)
     case PlainSymbol("bvxor") =>
-      translateBVBinOp("bvxor",  ModuloArithmetic.mod_xor, args)
+      translateBVBinOp("bvxor",  ModuloArithmetic.bv_xor, args)
     case PlainSymbol("bvxnor") =>
-      translateBVBinOp("bvxnor", ModuloArithmetic.mod_xnor, args)
+      translateBVBinOp("bvxnor", ModuloArithmetic.bv_xnor, args)
 
     case PlainSymbol("bvnand") => {
-      val (t, tp) = translateBVBinOp("bvnand", ModuloArithmetic.mod_and, args)
-      (ModuloArithmetic.mod_not(i(tp.modulus), t), tp)
+      val (t, tp) = translateBVBinOp("bvnand", ModuloArithmetic.bv_and, args)
+      (ModuloArithmetic.bv_not(i(tp.width), t), tp)
     }
     case PlainSymbol("bvnor") => {
-      val (t, tp) = translateBVBinOp("bvnor", ModuloArithmetic.mod_or, args)
-      (ModuloArithmetic.mod_not(i(tp.modulus), t), tp)
+      val (t, tp) = translateBVBinOp("bvnor", ModuloArithmetic.bv_or, args)
+      (ModuloArithmetic.bv_not(i(tp.width), t), tp)
     }
 
     case PlainSymbol("bvcomp") => {
       checkArgNum("bvcomp", 2, args)
       val a0@(transArg0, type0) = translateTerm(args(0), 0)
       val a1@(transArg1, type1) = translateTerm(args(1), 0)
-      val modulus = checkArgBVAgreement("bvcomp", args(0), type0, args(1), type1)
-      (ModuloArithmetic.mod_comp(i(modulus), asTerm(a0), asTerm(a1)), SMTBitVec(1))
+      val bits = checkArgBVAgreement("bvcomp", args(0), type0, args(1), type1)
+      (ModuloArithmetic.bv_comp(i(bits), asTerm(a0), asTerm(a1)), SMTBitVec(1))
     }
 
     case PlainSymbol("bvult") =>
-      translateBVBinPred("bvult", ModuloArithmetic.mod_ult, args)
+      translateBVBinPred("bvult", ModuloArithmetic.bv_ult, args)
     case PlainSymbol("bvule") =>
-      translateBVBinPred("bvule", ModuloArithmetic.mod_ule, args)
+      translateBVBinPred("bvule", ModuloArithmetic.bv_ule, args)
     case PlainSymbol("bvslt") =>
-      translateBVBinPred("bvslt", ModuloArithmetic.mod_slt, args)
+      translateBVBinPred("bvslt", ModuloArithmetic.bv_slt, args)
     case PlainSymbol("bvsle") =>
-      translateBVBinPred("bvsle", ModuloArithmetic.mod_sle, args)
+      translateBVBinPred("bvsle", ModuloArithmetic.bv_sle, args)
 
     case PlainSymbol("bvugt") =>
-      translateBVBinPredInv("bvugt", ModuloArithmetic.mod_ult, args)
+      translateBVBinPredInv("bvugt", ModuloArithmetic.bv_ult, args)
     case PlainSymbol("bvuge") =>
-      translateBVBinPredInv("bvuge", ModuloArithmetic.mod_ule, args)
+      translateBVBinPredInv("bvuge", ModuloArithmetic.bv_ule, args)
     case PlainSymbol("bvsgt") =>
-      translateBVBinPredInv("bvsgt", ModuloArithmetic.mod_slt, args)
+      translateBVBinPredInv("bvsgt", ModuloArithmetic.bv_slt, args)
     case PlainSymbol("bvsge") =>
-      translateBVBinPredInv("bvsge", ModuloArithmetic.mod_sle, args)
+      translateBVBinPredInv("bvsge", ModuloArithmetic.bv_sle, args)
 
-    // Not supported yet: repeat, zero_extend, sign_extend,
-    // rotate_left, rotate_right
+    case IndexedSymbol("zero_extend", digitsStr) => {
+      checkArgNum("zero_extend", 1, args)
+      val digits = digitsStr.toInt
+      val (transArg0, type0) = translateTerm(args(0), 0)
+      val width = extractBVWidth("zero_extend", type0, args(0))
+      (transArg0, SMTBitVec(width + digits))
+    }
+
+    case IndexedSymbol("sign_extend", digitsStr) => {
+      checkArgNum("sign_extend", 1, args)
+      val digits = digitsStr.toInt
+      val a0@(transArg0, type0) = translateTerm(args(0), 0)
+      val width = extractBVWidth("sign_extend", type0, args(0))
+      (ModuloArithmetic.cast2UnsignedBV(width + digits,
+         ModuloArithmetic.cast2SignedBV(width, asTerm(a0))),
+       SMTBitVec(width + digits))
+    }
+
+    // Not supported yet: repeat, rotate_left, rotate_right
 
     ////////////////////////////////////////////////////////////////////////////
     // ADT operations
@@ -2286,10 +2343,24 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
         a === b
     }
 
+  private def lookupSym(name : String) : SMTParser2InputAbsy.Env#DSym =
+    if (reusedSymbols == null) {
+      env lookupSym name
+    } else {
+      (env lookupSymPartial name) match {
+        case Some(res) =>
+          res
+        case None => {
+          importProverSymbol(name)
+          env lookupSym name
+        }
+      }
+    }
+
   private def unintFunApp(id : String,
                           sym : SymbolRef, args : Seq[Term], polarity : Int)
                          : (IExpression, SMTType) =
-    (env lookupSym id) match {
+    lookupSym(id) match {
       case Environment.Predicate(pred, _, _) => {
         checkArgNumLazy(printer print sym, pred.arity, args)
         (IAtom(pred, for (a <- args) yield asTerm(translateTerm(a, 0))),
@@ -2327,8 +2398,11 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
                                 : (IExpression, SMTType) = {
     checkArgNum(name, 1, args)
     val a0@(transArg0, type0) = translateTerm(args(0), 0)
-    (f(i(extractBVModulus(name, type0, args(0))), asTerm(a0)), type0)
+    (f(i(extractBVWidth(name, type0, args(0))), asTerm(a0)), type0)
   }
+
+  private def extractBVWidth(name : String, t : SMTType, arg : Term) : Int =
+    extractBVModulusWidth(name, t, arg)._2
 
   private def extractBVModulus(name : String, t : SMTType,
                                arg : Term) : IdealInt =
@@ -2350,8 +2424,8 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
     checkArgNum(name, 2, args)
     val a0@(transArg0, type0) = translateTerm(args(0), 0)
     val a1@(transArg1, type1) = translateTerm(args(1), 0)
-    val modulus = checkArgBVAgreement(name, args(0), type0, args(1), type1)
-    (f(i(modulus), asTerm(a0), asTerm(a1)), type0.asInstanceOf[SMTBitVec])
+    val bits = checkArgBVAgreement(name, args(0), type0, args(1), type1)
+    (f(i(bits), asTerm(a0), asTerm(a1)), type0.asInstanceOf[SMTBitVec])
   }
 
   private def translateBVBinPred(name : String, p : Predicate, args : Seq[Term])
@@ -2359,8 +2433,18 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
     checkArgNum(name, 2, args)
     val a0@(transArg0, type0) = translateTerm(args(0), 0)
     val a1@(transArg1, type1) = translateTerm(args(1), 0)
-    val modulus = checkArgBVAgreement(name, args(0), type0, args(1), type1)
-    (p(i(modulus), asTerm(a0), asTerm(a1)), SMTBool)
+    val bits = checkArgBVAgreement(name, args(0), type0, args(1), type1)
+    (p(i(bits), asTerm(a0), asTerm(a1)), SMTBool)
+  }
+
+  private def translateBVBinPred(name : String, args : Seq[Term],
+                                 op : (Int, ITerm, ITerm) => IFormula)
+                                : (IExpression, SMTType) = {
+    checkArgNum(name, 2, args)
+    val a0@(transArg0, type0) = translateTerm(args(0), 0)
+    val a1@(transArg1, type1) = translateTerm(args(1), 0)
+    val bits = checkArgBVAgreement(name, args(0), type0, args(1), type1)
+    (op(bits, asTerm(a0), asTerm(a1)), SMTBool)
   }
 
   private def translateBVBinPredInv(name : String, p : Predicate, args : Seq[Term])
@@ -2368,16 +2452,16 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
     checkArgNum(name, 2, args)
     val a0@(transArg0, type0) = translateTerm(args(0), 0)
     val a1@(transArg1, type1) = translateTerm(args(1), 0)
-    val modulus = checkArgBVAgreement(name, args(0), type0, args(1), type1)
-    (p(i(modulus), asTerm(a1), asTerm(a0)), SMTBool)
+    val bits = checkArgBVAgreement(name, args(0), type0, args(1), type1)
+    (p(i(bits), asTerm(a1), asTerm(a0)), SMTBool)
   }
 
   private def checkArgBVAgreement(name : String,
                                   arg0 : Term, type0 : SMTType,
-                                  arg1 : Term, type1 : SMTType) : IdealInt =
+                                  arg1 : Term, type1 : SMTType) : Int =
     (type0, type1) match {
       case (t@SMTBitVec(w1), SMTBitVec(w2)) if (w1 == w2) =>
-        t.modulus
+        w1
       case _ =>
         throw new Parser2InputAbsy.TranslationException(
           name + " cannot be applied to " +
@@ -2391,7 +2475,7 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
     
     case expr : ConstantSExpr => translateSpecConstant(expr.specconstant_)._1
     
-    case expr : SymbolSExpr => (env lookupSym asString(expr.symbol_)) match {
+    case expr : SymbolSExpr => lookupSym(asString(expr.symbol_)) match {
       case Environment.Function(fun, _) => {
         checkArgNumSExpr(printer print expr.symbol_,
                          fun.arity, List[SExpr]())
@@ -2424,7 +2508,7 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
             IFunApp(SimpleArray(expr.listsexpr_.size - 3).store,
                     translateSExprTail(expr.listsexpr_))
 
-          case funName => (env lookupSym funName) match {
+          case funName => lookupSym(funName) match {
             case Environment.Function(fun, _) => {
               checkArgNumSExpr(printer print funExpr.symbol_, fun.arity,
                                expr.listsexpr_.tail)
@@ -2496,11 +2580,14 @@ class SMTParser2InputAbsy (_env : Environment[SMTParser2InputAbsy.SMTType,
   protected def translateSpecConstant(c : SpecConstant)
                                      : (ITerm, SMTType) = c match {
     case c : NumConstant =>
-      (i(IdealInt(c.numeral_)), SMTInteger)
+      (i(IdealInt(c.numeral_)),
+       SMTInteger)
     case c : HexConstant =>
-      (i(IdealInt(c.hexadecimal_ substring 2, 16)), SMTInteger)
+      (i(IdealInt(c.hexadecimal_ substring 2, 16)),
+       SMTBitVec((c.hexadecimal_.size - 2) * 4))
     case c : BinConstant =>
-      (i(IdealInt(c.binary_ substring 2, 2)), SMTInteger)
+      (i(IdealInt(c.binary_ substring 2, 2)),
+       SMTBitVec(c.binary_.size - 2))
 
     case c : RatConstant => {
       val v = IdealRat(c.rational_)

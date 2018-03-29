@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2013-2016 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2013-2017 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -22,16 +22,19 @@
 package ap.theories
 
 import ap.basetypes.IdealInt
-import ap.Signature
+import ap.{Signature, PresburgerTools}
 import ap.parser._
 import ap.terfor.{Formula, TermOrder}
-import ap.terfor.preds.Predicate
-import ap.terfor.conjunctions.{Conjunction, ReduceWithConjunction}
+import ap.terfor.preds.{Predicate, Atom}
+import ap.terfor.conjunctions.{Conjunction, ReduceWithConjunction,
+                               ReducerPluginFactory,
+                               IdentityReducerPluginFactory}
+import ap.terfor.substitutions.VariableShiftSubst
 import ap.parameters.{PreprocessingSettings, Param}
 import ap.proof.theoryPlugins.Plugin
 import ap.util.Debug
 
-import scala.collection.mutable.{HashMap => MHashMap}
+import scala.collection.mutable.{ArrayBuffer, HashMap => MHashMap}
 
 object Theory {
 
@@ -86,6 +89,18 @@ object Theory {
   /**
    * Apply preprocessing to a formula over some set of
    * theories, prior to sending the formula to a prover.
+   * This method will be called form within 
+   */
+  def iPreprocess(f : IFormula,
+                  theories : Seq[Theory], signature : Signature)
+                 : (IFormula, Signature) =
+//  ap.util.Timer.measure("theory iPreprocessing") {
+    ((f, signature) /: theories) { case ((f, s), t) => t.iPreprocess(f, s) }
+//  }
+
+  /**
+   * Apply preprocessing to a formula over some set of
+   * theories, prior to sending the formula to a prover.
    */
   def preprocess(f : Conjunction,
                  theories : Seq[Theory],
@@ -93,6 +108,79 @@ object Theory {
 //  ap.util.Timer.measure("theory preprocessing") {
     (f /: theories) { case (f, t) => t.preprocess(f, order) }
 //  }
+
+  //////////////////////////////////////////////////////////////////////////////
+
+  /**
+   * Apply a uniform substitution to a formula, rewriting atoms to arbitrary
+   * new formulas.
+   * TODO: optimise
+   */
+  def rewritePreds(f : Conjunction, order : TermOrder)
+                  (rewrite : (Atom, Boolean) => Formula) : Conjunction =
+    rewritePredsHelp(f, false, order)(rewrite)
+
+  def rewritePredsHelp(f : Conjunction, negated : Boolean, order : TermOrder)
+                      (rewrite : (Atom, Boolean) => Formula) : Conjunction = {
+    var newFors = List[Formula]()
+
+    val newPosLits =
+      (for (a <- f.predConj.positiveLits.iterator;
+            newF = rewrite(a, negated);
+            b <- newF match {
+              case b : Atom =>
+                Iterator single b
+              case newF => {
+                newFors = newF :: newFors
+                Iterator.empty
+              }
+            })
+       yield b).toArray
+
+    val newNegLits =
+      (for (a <- f.predConj.negativeLits.iterator;
+            newF = rewrite(a, !negated);
+            b <- newF match {
+              case b : Atom =>
+                Iterator single b
+              case newF => {
+                newFors = Conjunction.negate(newF, order) :: newFors
+                Iterator.empty
+              }
+            })
+       yield b).toArray
+
+    val newPredConj = f.predConj.updateLits(newPosLits, newNegLits)(order)
+
+    val newNegConjs =
+      f.negatedConjs.update(
+        for (c <- f.negatedConjs)
+        yield rewritePredsHelp(c, !negated, order)(rewrite), order)
+
+    if (newFors.isEmpty &&
+        (newPredConj eq f.predConj) &&
+        (newNegConjs eq f.negatedConjs)) {
+      f
+    } else if (newFors.isEmpty) {
+      Conjunction(f.quans, f.arithConj, newPredConj, newNegConjs, order)
+    } else {
+      val quantifiedParts =
+        PresburgerTools toPrenex Conjunction.conj(newFors, order)
+      val newQuanNum =
+        quantifiedParts.quans.size
+
+      val unquantifiedParts =
+        VariableShiftSubst(0, newQuanNum, order)(
+          Conjunction(List(), f.arithConj, newPredConj, newNegConjs, order))
+
+      Conjunction.quantify(
+        quantifiedParts.quans ++ f.quans,
+        Conjunction.conj(
+          List(quantifiedParts unquantify newQuanNum, unquantifiedParts),
+          order),
+        order)
+    }
+  }
 
   //////////////////////////////////////////////////////////////////////////////
 
@@ -220,11 +308,30 @@ trait Theory {
   def plugin : Option[Plugin]
 
   /**
+   * Optionally, other theories that this theory depends on.
+   */
+  val dependencies : Iterable[Theory] = List()
+
+  /**
+   * Optionally, a pre-processor that is applied to formulas over this
+   * theory, prior to sending the formula to a prover. This method
+   * will be applied very early in the translation process.
+   */
+  def iPreprocess(f : IFormula, signature : Signature)
+                 : (IFormula, Signature) =
+    (f, signature)
+
+  /**
    * Optionally, a pre-processor that is applied to formulas over this
    * theory, prior to sending the formula to a prover.
    */
-  def preprocess(f : Conjunction,
-                 order : TermOrder) : Conjunction = f
+  def preprocess(f : Conjunction, order : TermOrder) : Conjunction = f
+
+  /**
+   * Optionally, a plugin for the reducer applied to formulas both before
+   * and during proving.
+   */
+  val reducerPlugin : ReducerPluginFactory = IdentityReducerPluginFactory
 
   /**
    * If this theory defines any <code>Theory.Decoder</code>, which

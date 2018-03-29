@@ -24,6 +24,7 @@ package ap.parameters;
 import ap.theories.ADT.TermMeasure
 import ap.Signature.PredicateMatchConfig
 import ap.proof.tree.{RandomDataSource, NonRandomDataSource}
+import ap.terfor.conjunctions.{ReducerPluginFactory, IdentityReducerPlugin}
 
 object Param {
   
@@ -353,6 +354,16 @@ object Param {
   case object RANDOM_SEED extends Param {
     type Value = Option[Int]
     val defau : Option[Int] = Some(1234567)
+  }
+
+  case object REDUCER_SETTINGS extends Param {
+    type Value = ReducerSettings
+    val defau : ReducerSettings = ReducerSettings.DEFAULT
+  }
+
+  case object REDUCER_PLUGIN extends Param {
+    type Value = ReducerPluginFactory
+    val defau : ReducerPluginFactory = IdentityReducerPlugin.factory
   }
 }
 

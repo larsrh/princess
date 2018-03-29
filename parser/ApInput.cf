@@ -38,10 +38,14 @@ FunctionDecls.	Block		::= "\\functions" "{" [DeclFunC] "}";
 ExConstants.	Block		::= ExConstantsSec "{" [DeclConstantC] "}";
 UniConstants.	Block		::= "\\universalConstants" "{" [DeclConstantC] "}";
 PredDecls.	Block		::= "\\predicates" "{" [DeclPredC] "}";
-Interpolant.    Block           ::= "\\interpolant" "{" [Ident] ";" [Ident] "}";
+Interpolant.    Block           ::= "\\interpolant" "{" [InterpBlockC] "}";
 
 ECS1.		ExConstantsSec  ::= "\\existentialConstants";
 ECS2.		ExConstantsSec  ::= "\\metaVariables";
+ECS3.		ExConstantsSec  ::= "\\variables";
+
+InterpBlock.    InterpBlockC    ::= [Ident];
+separator nonempty InterpBlockC ";";
 
 --------------------------------------------------------------------------------
 -- Expressions, which cover both first-order formulas and terms
@@ -58,29 +62,35 @@ ExprTrigger.	Expression4	::= "{" [ArgC] "}" Expression4;
 ExprPart.       Expression4     ::= "\\part" "[" Ident "]" Expression4;
 ExprRel.	Expression5	::= Expression6 RelSym Expression6;
 
-ExprPlus.	Expression6	::= Expression6 "+" Expression7;
-ExprMinus.	Expression6	::= Expression6 "-" Expression7;
-ExprMult.	Expression7	::= Expression7 "*" Expression8;
-ExprDiv.	Expression7	::= Expression7 "/" Expression8;
-ExprMod.	Expression7	::= Expression7 "%" Expression8;
-ExprUnPlus.	Expression8	::= "+" Expression9;
-ExprUnMinus.	Expression8	::= "-" Expression9;
-ExprExp.	Expression9	::= Expression9 "^" Expression10;
-ExprIfThenElse. Expression10    ::= "\\if" "(" Expression ")"
+ExprShiftL.	Expression6	::= Expression6 "<<" Expression7;
+ExprShiftR.	Expression6	::= Expression6 ">>" Expression7;
+ExprPlus.	Expression7	::= Expression7 "+" Expression8;
+ExprMinus.	Expression7	::= Expression7 "-" Expression8;
+ExprMult.	Expression8	::= Expression8 "*" Expression9;
+ExprDiv.	Expression8	::= Expression8 "/" Expression9;
+ExprMod.	Expression8	::= Expression8 "%" Expression9;
+ExprCast.	Expression9	::= "\\as" "[" Type "]" Expression9;
+ExprUnPlus.	Expression9	::= "+" Expression10;
+ExprUnMinus.	Expression9	::= "-" Expression10;
+ExprExp.	Expression10	::= Expression10 "^" Expression11;
+ExprIfThenElse. Expression11    ::= "\\if" "(" Expression ")"
                                     "\\then" "(" Expression ")"
                                     "\\else" "(" Expression ")";
-ExprAbs.	Expression10	::= "\\abs" "(" Expression ")";
-ExprMax.	Expression10	::= "\\max" OptArgs;
-ExprMin.	Expression10	::= "\\min" OptArgs;
-ExprDistinct.	Expression10	::= "\\distinct" OptArgs;
-ExprSize.	Expression10	::= "\\size" "(" Expression ")";
-ExprIdApp.	Expression10	::= Ident OptArgs;
-ExprDotAttr.    Expression10    ::= Expression10 "." Ident;
-ExprTrue.	Expression10	::= "true";
-ExprFalse.	Expression10	::= "false";
-ExprLit.	Expression10	::= IntLit;
+ExprAbs.	Expression11	::= "\\abs" "(" Expression ")";
+ExprMax.	Expression11	::= "\\max" OptArgs;
+ExprMin.	Expression11	::= "\\min" OptArgs;
+ExprDistinct.	Expression11	::= "\\distinct" OptArgs;
+ExprSize.	Expression11	::= "\\size" "(" Expression ")";
+ExprIdApp.	Expression11	::= Ident OptArgs;
+ExprDotAttr.    Expression11    ::= Expression11 "." Ident;
+ExprDotCast.	Expression9	::= Expression11 "." "\\as" "[" Type "]" ;
+ExprDotSize.	Expression11	::= Expression11 "." "\\size";
+ExprDotAbs.	Expression11	::= Expression11 "." "\\abs";
+ExprTrue.	Expression11	::= "true";
+ExprFalse.	Expression11	::= "false";
+ExprLit.	Expression11	::= IntLit;
 
-coercions Expression 10;
+coercions Expression 11;
 
 QuantAll.	Quant		::= "\\forall";
 QuantEx.	Quant		::= "\\exists";
@@ -128,6 +138,7 @@ separator FunOption "";
 -- Sort declarations
 
 DeclADT.        DeclSortC       ::= Ident "{" [DeclCtorC] "}";
+DeclUnintSort.  DeclSortC       ::= Ident;
 terminator DeclSortC ";";
 
 DeclCtor.       DeclCtorC       ::= Ident OptFormalArgs;
@@ -166,6 +177,9 @@ TypeInt.	Type		::= "int";
 TypeNat.	Type		::= "nat";
 TypeInterval.	Type		::= "int" "[" IntervalLower "," IntervalUpper "]";
 TypeBool.	Type		::= "bool";
+TypeMod.        Type            ::= "mod" "[" IntervalLower "," IntervalUpper "]";
+TypeBV.         Type            ::= "bv" "[" IntLit "]";
+TypeSignedBV.   Type            ::= "signed" "bv" "[" IntLit "]";
 TypeIdent.	Type		::= Ident;
 
 InfLower.       IntervalLower   ::= "-" "inf";

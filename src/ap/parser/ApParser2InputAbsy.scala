@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2011-2017 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2011-2018 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -33,7 +33,7 @@ import ap.util.{Debug, Logic, PlainRange}
 import ap.basetypes.IdealInt
 import ap.parser.ApInput._
 import ap.parser.ApInput.Absyn._
-import ap.theories.ADT
+import ap.theories.{ADT, ModuloArithmetic}
 import IExpression.Sort
 import ap.types.{MonoSortedIFunction, SortedIFunction,
                  SortedConstantTerm,
@@ -147,11 +147,18 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
   protected def translateInterpolantSpecs(api : API)
                                          : List[IInterpolantSpec] = api match {
     case api : BlockList => {
-      (for (block <- api.listblock_; if (block.isInstanceOf[Interpolant])) yield {
-         val inter = block.asInstanceOf[Interpolant]
+      (for (block <- api.listblock_;
+            if block.isInstanceOf[Interpolant];
+            inter = block.asInstanceOf[Interpolant];
+            intBlocks = inter.listinterpblockc_;
+            n <- 1 until intBlocks.size) yield {
+         val left = intBlocks take n
+         val right = intBlocks drop n
          IInterpolantSpec(
-           (for (id <- inter.listident_1) yield (env lookupPartName id)).toList,
-           (for (id <- inter.listident_2) yield (env lookupPartName id)).toList)
+           (for (ids <- left; id <- ids.asInstanceOf[InterpBlock].listident_)
+              yield (env lookupPartName id)).toList,
+           (for (ids <- right; id <- ids.asInstanceOf[InterpBlock].listident_)
+              yield (env lookupPartName id)).toList)
        }).toList
     }
   }
@@ -161,7 +168,21 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
   private def collectSortDeclarations(api : API) : Unit = api match {
     case api : BlockList => {
 
-      // first determine all declared ADTs
+      // declare uninterpreted sorts
+      for (block <- api.listblock_.iterator) block match {
+        case block : SortDecls =>
+          for (decl <- block.listdeclsortc_.iterator) decl match {
+            case decl : DeclUnintSort => {
+              val name = decl.ident_
+              warn("treating sort " + name + " as infinite sort")
+              env.addSort(name, new Sort.InfUninterpreted(name))
+            }
+            case _ => // nothing
+          }
+        case _ => // nothing
+      }
+
+      // determine all declared ADTs
       val adtNames = new ArrayBuffer[String]
 
       for (block <- api.listblock_.iterator) block match {
@@ -169,6 +190,7 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
           for (decl <- block.listdeclsortc_.iterator) decl match {
             case decl : DeclADT =>
               adtNames += decl.ident_
+            case _ => // nothing
           }
         case _ => // nothing
       }
@@ -213,6 +235,7 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
                 ctors += ((ctorName, ADT.CtorSignature(arguments, adtSort)))
               }
             }
+            case _ => // nothing
           }
         case _ => // nothing
       }
@@ -402,26 +425,46 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
     case _ : TypeNat => Sort.Nat
     case _ : TypeBool => Sort.Bool
     case t : TypeInterval => {
-      val lb = t.intervallower_ match {
-        case _ : InfLower =>      None
-        case iv : NumLower =>     Some(IdealInt(iv.intlit_))
-        case iv : NegNumLower =>  Some(-IdealInt(iv.intlit_))
-      }
-      val ub = t.intervalupper_ match {
-        case _ : InfUpper =>     None
-        case iv : NumUpper =>    Some(IdealInt(iv.intlit_))
-        case iv : NegNumUpper => Some(-IdealInt(iv.intlit_))
-      }
-
-      for (l <- lb; u <- ub)
-        if (l > u)
-          throw new Parser2InputAbsy.TranslationException(
-            "Interval types have to be non-empty")
-          
+      val (lb, ub) = translateBounds(t.intervallower_, t.intervalupper_)
       Sort.Interval(lb, ub)
     }
+    case t : TypeMod => {
+      val (lb, ub) = translateBounds(t.intervallower_, t.intervalupper_)
+      if (lb.isEmpty || ub.isEmpty)
+        throw new Parser2InputAbsy.TranslationException(
+          "Modulo sorts have to be finite")
+      ModuloArithmetic.ModSort(lb.get, ub.get)
+    }
+    case t : TypeBV =>
+      ModuloArithmetic.UnsignedBVSort(t.intlit_.toInt)
+    case t : TypeSignedBV =>
+      ModuloArithmetic.SignedBVSort(t.intlit_.toInt)
     case t : TypeIdent =>
       env lookupSort t.ident_
+  }
+
+  private def translateBounds(lower : IntervalLower,
+                              upper : IntervalUpper)
+                           : (Option[IdealInt], Option[IdealInt]) = {
+    val lb = bound2IdealInt(lower)
+    val ub = bound2IdealInt(upper)
+    for (l <- lb; u <- ub)
+      if (l > u)
+        throw new Parser2InputAbsy.TranslationException(
+          "Interval types have to be non-empty")
+    (lb, ub)
+  }
+
+  private def bound2IdealInt(b : IntervalLower) : Option[IdealInt] = b match {
+    case _ : InfLower =>      None
+    case iv : NumLower =>     Some(IdealInt(iv.intlit_))
+    case iv : NegNumLower =>  Some(-IdealInt(iv.intlit_))
+  }
+
+  private def bound2IdealInt(b : IntervalUpper) : Option[IdealInt] = b match {
+    case _ : InfUpper =>      None
+    case iv : NumUpper =>     Some(IdealInt(iv.intlit_))
+    case iv : NegNumUpper =>  Some(-IdealInt(iv.intlit_))
   }
 
   private def toMVBool(s : Sort) : Sort = s match {
@@ -655,17 +698,17 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
         translateCompBinTerConnective("!=", f.expression_1, f.expression_2,
                                       _ =/= _)
       case _ : RelLeq =>
-        translateNumBinTerConnective("<=", f.expression_1, f.expression_2,
-                                     _ <= _)
+        translateNumCompBinTerConnective("<=", f.expression_1, f.expression_2,
+                                         _ <= _)
       case _ : RelGeq =>
-        translateNumBinTerConnective(">=", f.expression_1, f.expression_2,
-                                     _ >= _)
+        translateNumCompBinTerConnective(">=", f.expression_1, f.expression_2,
+                                         _ >= _)
       case _ : RelLt =>
-        translateNumBinTerConnective("<", f.expression_1, f.expression_2,
-                                     _ < _)
+        translateNumCompBinTerConnective("<", f.expression_1, f.expression_2,
+                                         _ < _)
       case _ : RelGt =>
-        translateNumBinTerConnective(">", f.expression_1, f.expression_2,
-                                     _ > _)
+        translateNumCompBinTerConnective(">", f.expression_1, f.expression_2,
+                                         _ > _)
     }
     case f : ExprTrigger =>
       (translateTrigger(f), Sort.Bool)
@@ -675,6 +718,37 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
        Sort.Bool)
     ////////////////////////////////////////////////////////////////////////////
     // Terms
+    case t : ExprShiftL =>
+      (translateExpression(t.expression_1),
+       translateExpression(t.expression_2)) match {
+        case ((left : ITerm, Sort.Numeric(_)), (IIntLit(bits), Sort.Numeric(_)))
+          if bits.signum >= 0 =>
+            (left * (IdealInt(2) pow bits.intValueSafe), Sort.Integer)
+        case ((left : ITerm,
+                 sort@ModuloArithmetic.ModSort(lower, upper)),
+              (right : ITerm,
+                 Sort.Numeric(_) | _ : ModuloArithmetic.ModSort)) =>
+            (ModuloArithmetic.shiftLeft(sort, left, right), sort)
+        case ((left, _), (right, _)) =>
+          throw new Parser2InputAbsy.TranslationException(
+            "Cannot shift " + left + " to the left by " + right + " bits")
+      }
+    case t : ExprShiftR =>
+      (translateExpression(t.expression_1),
+       translateExpression(t.expression_2)) match {
+        case ((left : ITerm, Sort.Numeric(_)), (IIntLit(bits), Sort.Numeric(_)))
+          if bits.signum >= 0 =>
+            (mulTheory.eDiv(left, (IdealInt(2) pow bits.intValueSafe)),
+             Sort.Integer)
+        case ((left : ITerm,
+                 sort@ModuloArithmetic.ModSort(lower, upper)),
+              (right : ITerm,
+                 Sort.Numeric(_) | _ : ModuloArithmetic.ModSort)) =>
+            (ModuloArithmetic.shiftRight(sort, left, right), sort)
+        case ((left, _), (right, _)) =>
+          throw new Parser2InputAbsy.TranslationException(
+            "Cannot shift " + left + " to the right by " + right + " bits")
+      }
     case t : ExprPlus =>
       translateNumBinTerConnective("+", t.expression_1, t.expression_2, _ + _)
     case t : ExprMinus =>
@@ -682,15 +756,18 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
     case t : ExprMult =>
       translateNumBinTerConnective("*", t.expression_1, t.expression_2, mult _)
     case t : ExprDiv =>
-      translateNumBinTerConnective("/", t.expression_1, t.expression_2, mulTheory.eDiv _)
+      translateNumBinTerConnective("/", t.expression_1, t.expression_2,
+                                   mulTheory.eDiv _)
     case t : ExprMod =>
-      translateNumBinTerConnective("%", t.expression_1, t.expression_2, mulTheory.eMod _)
+      translateNumBinTerConnective("%", t.expression_1, t.expression_2,
+                                   mulTheory.eMod _)
     case t : ExprUnPlus =>
-      translateUnTerConnective("+", t.expression_, (lc) => lc)
+      translateNumUnTerConnective("+", t.expression_, (lc) => lc)
     case t : ExprUnMinus =>
-      translateUnTerConnective("-", t.expression_, - _)
+      translateNumUnTerConnective("-", t.expression_, - _)
     case t : ExprExp =>
-      translateNumBinTerConnective("^", t.expression_1, t.expression_2, mulTheory.pow _)
+      wrapResult(translateBinTerConnective("^", t.expression_1, t.expression_2,
+                                           mulTheory.pow _, powSortCoercion _))
     case t : ExprLit =>
       (IIntLit(IdealInt(t.intlit_)), Sort.Integer)
     case t : ExprEpsilon => {
@@ -700,38 +777,31 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
       (sort eps cond, sort)
     }
     case t : ExprAbs =>
-      translateUnTerConnective("\\abs", t.expression_, abs _)
+      translateNumUnTerConnective("\\abs", t.expression_, abs _)
+    case t : ExprDotAbs =>
+      translateNumUnTerConnective("\\abs", t.expression_, abs _)
     case t : ExprMax => {
-      val args = translateNumOptArgs("\\max", t.optargs_)
+      val (args, sort) = translateNumOptArgs("\\max", t.optargs_)
       if (args.isEmpty)
         throw new Parser2InputAbsy.TranslationException(
             "Function \\max needs to receive at least one argument")
-      (max(args), Sort.Integer)
+      (max(args), sort)
     }
     case t : ExprMin => {
-      val args = translateNumOptArgs("\\min", t.optargs_)
+      val (args, sort) = translateNumOptArgs("\\min", t.optargs_)
       if (args.isEmpty)
         throw new Parser2InputAbsy.TranslationException(
             "Function \\min needs to receive at least one argument")
-      (min(args), Sort.Integer)
+      (min(args), sort)
     }
-    case t : ExprSize => {
-      val (arg, sort) = translateExpression(t.expression_)
-      sort match {
-        case sort : ADT.ADTProxySort => {
-          if (sort.adtTheory.termSize == null)
-            throw new Parser2InputAbsy.TranslationException(
-                "Function \\size can only be used in combination with option " +
-                "-adtMeasure=size")
-          (IFunApp(sort.adtTheory.termSize(sort.sortNum),
-                   List(arg.asInstanceOf[ITerm])),
-           Sort.Integer)
-        }
-        case sort =>
-          throw new Parser2InputAbsy.TranslationException(
-              "Function \\size needs to receive an ADT term as argument")
-      }
-    }
+    case t : ExprCast =>
+      translateCast(t.expression_, t.type_)
+    case t : ExprDotCast =>
+      translateCast(t.expression_, t.type_)
+    case t : ExprSize =>
+      translateSize(t.expression_)
+    case t : ExprDotSize =>
+      translateSize(t.expression_)
     ////////////////////////////////////////////////////////////////////////////
     // If-then-else (can be formula or term)
     case t : ExprIfThenElse => {
@@ -792,26 +862,70 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
                    "Expected a term, not " + expr)
   }
 
-  private def asNumTerm(opName : String,
-                        expr : (IExpression, Sort)) : ITerm = expr match {
-    case (expr : ITerm, Sort.Numeric(_)) =>
-      expr
-    case (_, s) => 
+  private def assertNumSort(opName : String, sort : Sort) : Unit = sort match {
+    case Sort.Numeric(_) =>
+      // ok
+    case ModuloArithmetic.ModSort(_, _) =>
+      // ok
+    case sort =>
       throw new Parser2InputAbsy.TranslationException(
-              opName + " expects a numeric term, not sort " + s)
+              opName + " expects a numeric term, not sort " + sort)
   }
+
   //////////////////////////////////////////////////////////////////////////////
+
+  private def translateCast(t : Expression, ty : Type) : (IExpression, Sort) = {
+      val p@(arg, oldSort) = translateExpression(t)
+      type2Sort(ty) match {
+        case `oldSort` =>
+          (arg, oldSort)
+        case Sort.Integer =>
+          (arg, Sort.Integer)
+        case sort : ModuloArithmetic.ModSort =>
+          (ModuloArithmetic.cast2Sort(sort, asTerm(p)), sort)
+        case sort =>
+          throw new Parser2InputAbsy.TranslationException(
+            "Cannot cast to sort " + sort)
+      }
+  }
+
+  private def translateSize(t : Expression) : (IExpression, Sort) = {
+      val (arg, sort) = translateExpression(t)
+      sort match {
+        case sort : ADT.ADTProxySort => {
+          if (sort.adtTheory.termSize == null)
+            throw new Parser2InputAbsy.TranslationException(
+                "Function \\size can only be used in combination with option " +
+                "-adtMeasure=size")
+          (IFunApp(sort.adtTheory.termSize(sort.sortNum),
+                   List(arg.asInstanceOf[ITerm])),
+           Sort.Integer)
+        }
+        case sort =>
+          throw new Parser2InputAbsy.TranslationException(
+              "Function \\size needs to receive an ADT term as argument")
+      }
+  }
 
   private def translateUnForConnective(f : Expression,
                                        con : (IFormula) => IFormula)
               : (IExpression, Sort) =
     (con(asFormula(translateExpression(f))), Sort.Bool)
   
-  private def translateUnTerConnective(opName : String,
-                                       f : Expression,
-                                       con : (ITerm) => IExpression)
-              : (IExpression, Sort) =
-    (con(asNumTerm(opName, translateExpression(f))), Sort.Integer)
+  private def translateNumUnTerConnective(opName : String,
+                                          f : Expression,
+                                          con : (ITerm) => IExpression)
+                                       : (IExpression, Sort) = {
+    val (expr, sort) = translateExpression(f)
+    val resSort = sort match {
+      case Sort.Numeric(_) => Sort.Integer
+      case sort : ModuloArithmetic.ModSort => sort
+      case sort =>
+        throw new Parser2InputAbsy.TranslationException(
+                opName + " expects a numeric term, not sort " + sort)
+    }
+    wrapResult((con(asTerm((expr, sort))), resSort))
+  }
 
   private def translateBinForConnective(f1 : Expression, f2 : Expression,
                                         con : (IFormula, IFormula) => IFormula)
@@ -824,13 +938,50 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
                                            f1 : Expression, f2 : Expression,
                                            con : (ITerm, ITerm) => IExpression)
                                           : (IExpression, Sort) =
-    translateBinTerConnective(opName, f1, f2, con,
-      (s1, s2) => (s1, s2) match {
-                    case (Sort.Numeric(_), Sort.Numeric(_)) =>
-                      Some(Sort.Integer)
-                    case _ =>
-                      None
-                  })
+    wrapResult(translateBinTerConnective(opName, f1, f2, con,
+                                         numSortCoercion _))
+
+  private def translateNumCompBinTerConnective(
+                                           opName : String,
+                                           f1 : Expression, f2 : Expression,
+                                           con : (ITerm, ITerm) => IExpression)
+                                          : (IExpression, Sort) = {
+    (translateBinTerConnective(opName, f1, f2, con, numSortCoercion _)._1,
+     Sort.Bool)
+  }
+
+  private def wrapResult(res : (IExpression, Sort)) : (IExpression, Sort) =
+    res._2 match {
+      case s : ModuloArithmetic.ModSort =>
+        (ModuloArithmetic.cast2Sort(s, res._1.asInstanceOf[ITerm]), s)
+      case _ =>
+        res
+    }
+
+  private def numSortCoercion(s1 : Sort, s2 : Sort) : Option[Sort] =
+    (s1, s2) match {
+      case (Sort.Numeric(_), Sort.Numeric(_)) =>
+        Some(Sort.Integer)
+      case (s1 : ModuloArithmetic.ModSort,
+            s2 : ModuloArithmetic.ModSort) if (s1 == s2) =>
+        Some(s1)
+      case (s : ModuloArithmetic.ModSort, Sort.Numeric(_)) =>
+        Some(s)
+      case (Sort.Numeric(_), s : ModuloArithmetic.ModSort) =>
+        Some(s)
+      case _ =>
+        None
+    }
+
+  private def powSortCoercion(s1 : Sort, s2 : Sort) : Option[Sort] =
+    (s1, s2) match {
+      case (Sort.Numeric(_), Sort.Integer) =>
+        Some(Sort.Integer)
+      case (s : ModuloArithmetic.ModSort, Sort.Integer) =>
+        Some(s)
+      case _ =>
+        None
+    }
 
   private def translateCompBinTerConnective(opName : String,
                                             f1 : Expression, f2 : Expression,
@@ -847,6 +998,10 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
         Some(Sort.Integer)
       case (s1, s2) if s1 == s2 =>
         Some(s1)
+      case (Sort.Numeric(_), _ : ModuloArithmetic.ModSort) =>
+        Some(Sort.Integer)
+      case (_ : ModuloArithmetic.ModSort, Sort.Numeric(_)) =>
+        Some(Sort.Integer)
       case (Sort.Bool, Sort.MultipleValueBool) |
            (Sort.MultipleValueBool, Sort.Bool) =>
         Some(Sort.MultipleValueBool)
@@ -980,7 +1135,7 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
     }
 
   private def translateTrigger(trigger : ExprTrigger) : IFormula = {
-    val patterns = translateExprArgs(trigger.listargc_)
+    val patterns = translateExprArgs(trigger.listargc_) map (_._1)
     val body = asFormula(translateExpression(trigger.expression_))
     ITrigger(ITrigger.extractTerms(patterns), body)
   }
@@ -996,20 +1151,24 @@ class ApParser2InputAbsy(_env : ApParser2InputAbsy.Env,
       case arg : Arg => translateExpression(arg.expression_)
     }
 
-  private def translateNumOptArgs(opName : String,
-                                  args : OptArgs) : Seq[ITerm] = args match {
-    case args : Args => translateNumArgs(opName, args.listargc_)
-    case _ : NoArgs => List()
+  private def translateNumOptArgs(opName : String, args : OptArgs)
+                                 : (Seq[ITerm], Sort) = args match {
+    case args : Args => {
+      val transArgs = translateExprArgs(args.listargc_)
+      val sort = transArgs.head._2
+      assertNumSort(opName, sort)
+      if (transArgs exists { case (_, s) => s != sort })
+        throw new Parser2InputAbsy.TranslationException(
+               opName + " has to be applied to terms of the same numeric sort")
+      (transArgs map (_._1.asInstanceOf[ITerm]), sort)
+    }
+    case _ : NoArgs =>
+      (List(), Sort.Integer)
   }
   
-  private def translateNumArgs(opName : String, args : ListArgC) =
-    for (arg <- args) yield arg match {
-      case arg : Arg => asNumTerm(opName, translateExpression(arg.expression_))
-    }
-
   private def translateExprArgs(args : ListArgC) =
-    for (arg <- args) yield arg match {
-      case arg : Arg => translateExpression(arg.expression_)._1
-    }
+    (for (arg <- args.iterator) yield arg match {
+       case arg : Arg => translateExpression(arg.expression_)
+     }).toSeq
 
 }

@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2009-2011 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2009-2017 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -21,6 +21,7 @@
 
 package ap.terfor.arithconj;
 
+import ap.basetypes.IdealInt
 import ap.terfor._
 import ap.terfor.linearcombination.LinearCombination
 import ap.terfor.conjunctions.{Conjunction, NegatedConjunctions}
@@ -74,13 +75,21 @@ object ReduceWithAC {
     reducer = reducer addInEqs newInEqs
 
     // reduce negated equations, assuming the reduced inequalities
-    val newNegEqs = reducer.reduce(ac.negativeEqs, logger)
+    val (newNegEqs, additionalInEqs) = reducer.reduce(ac.negativeEqs, logger)
 
     if ((newPosEqs eq ac.positiveEqs) &&
         (newNegEqs eq ac.negativeEqs) &&
         (newInEqs eq ac.inEqs)) {
       // then nothing has changed, and we can give back the old object
       (ac, reducer addEquations newNegEqs)
+    } else if (!additionalInEqs.isEmpty) {
+      // some disequalities were turned into inequalities, recurse
+      val allInEqs =
+        InEqConj.conj(Seqs.doubleIterator(newInEqs, additionalInEqs),
+                      logger, reducer.order)
+      val newAC =
+        ArithConj(newPosEqs, newNegEqs, allInEqs, reducer.order)
+      reduceAC(newAC, initialReducer, logger)
     } else {
       val newAC = ArithConj(newPosEqs, newNegEqs, newInEqs, reducer.order)
       if ((newInEqs.equalityInfs.isEmpty ||
@@ -124,18 +133,6 @@ class ReduceWithAC private (positiveEqs : ReduceWithEqs,
     }
   }
 
-  def addArithConj(ac : ArithConj) : ReduceWithAC = {
-    //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
-    Debug.assertPre(ReduceWithAC.AC, ac isSortedBy order)
-    //-END-ASSERTION-///////////////////////////////////////////////////////////
-    if (ac.isEmpty)
-      this
-    else
-      new ReduceWithAC(positiveEqs addEquations ac.positiveEqs.toMap,
-                       negativeEqs addEquations ac.negativeEqs.toSet,
-                       inEqs addInEqs ac.inEqs,
-                       order)    
-  }
   
   private def addEquations(eqs : EquationConj) : ReduceWithAC = {
     //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
@@ -210,16 +207,17 @@ class ReduceWithAC private (positiveEqs : ReduceWithEqs,
   }
 
   private def reduce(eqs : NegEquationConj,
-                     logger : ComputationLogger) : NegEquationConj = {
+                     logger : ComputationLogger)
+                    : (NegEquationConj, InEqConj) = {
     //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
     Debug.assertPre(ReduceWithAC.AC, eqs isSortedBy order)
     //-END-ASSERTION-///////////////////////////////////////////////////////////
     if (eqs.isTrue) {
-      eqs
+      (eqs, InEqConj.TRUE)
     } else {
-      val redEqs = inEqs(negativeEqs(positiveEqs(eqs, logger)))
-      if (redEqs.isFalse) throw FALSE_EXCEPTION_STD
-      redEqs
+      val res = inEqs(negativeEqs(positiveEqs(eqs, logger)), logger)
+      if (res._1.isFalse) throw FALSE_EXCEPTION_STD
+      res
     }
   }
 
@@ -306,7 +304,7 @@ class ReduceWithAC private (positiveEqs : ReduceWithEqs,
    * Just reduce the components of the conjunction individually,
    * do not do any internal propagation.
    */
-  def plainReduce(conj : ArithConj) : ArithConj = try {
+  def plainReduce(conj : ArithConj) : (ArithConj, ReduceWithAC) = try {
     val (newEqs, newInEqs) =
       if (conj.inEqs.equalityInfs.isTrue) {
         (reduce(conj.positiveEqs),
@@ -323,16 +321,22 @@ class ReduceWithAC private (positiveEqs : ReduceWithEqs,
         (newEqs, newInEqs)
       }
 
-    val newNegEqs = reduce(conj.negativeEqs, ComputationLogger.NonLogger)
+    val newReducer =
+      this addInEqs newInEqs
+    val (newNegEqs, additionalInEqs) =
+      newReducer.reduce(conj.negativeEqs, ComputationLogger.NonLogger)
 
     if ((newEqs    eq conj.positiveEqs) &&
         (newNegEqs eq conj.negativeEqs) &&
-        (newInEqs  eq conj.inEqs))
-      conj
-    else
-      ArithConj(newEqs, newNegEqs, newInEqs, order)
+        (newInEqs  eq conj.inEqs)) {
+      (conj, newReducer)
+    } else {
+      val allInEqs =
+        InEqConj.conj(Seqs.doubleIterator(newInEqs, additionalInEqs), order)
+      (ArithConj(newEqs, newNegEqs, allInEqs, order), newReducer)
+    }
   }
-  catch { case _ : FALSE_EXCEPTION => ArithConj.FALSE }
+  catch { case _ : FALSE_EXCEPTION => (ArithConj.FALSE, this) }
 
   def apply(conj : EquationConj) : EquationConj =
     try { this reduce conj }
@@ -346,7 +350,34 @@ class ReduceWithAC private (positiveEqs : ReduceWithEqs,
       // we use the inconsistent reduced predicate as result (because the method
       // PredConj.FALSE needs an argument)
       catch { case FALSE_EXCEPTION_PRED(falsePredConj) => falsePredConj }    
-    
+
+  /**
+   * Check whether known inequalities imply a lower bound of the given term.
+   */
+  def lowerBound(t : Term) : Option[IdealInt] = inEqs lowerBound t
+
+  /**
+   * Check whether the known inequalities imply a lower bound of the given term.
+   * Also return assumed inequalities needed to derive the bound.
+   */
+  def lowerBoundWithAssumptions(t : Term)
+      : Option[(IdealInt, Seq[LinearCombination])] =
+    inEqs lowerBoundWithAssumptions t
+
+  /**
+   * Check whether known inequalities imply an upper bound of the given
+   * term.
+   */
+  def upperBound(t : Term) : Option[IdealInt] = inEqs upperBound t
+
+  /**
+   * Check whether the known inequalities imply an upper bound of the given
+   * term. Also return assumed inequalities needed to derive the bound.
+   */
+  def upperBoundWithAssumptions(t : Term)
+      : Option[(IdealInt, Seq[LinearCombination])] =
+    inEqs upperBoundWithAssumptions t
+
 }
 
 private abstract class FALSE_EXCEPTION extends Exception

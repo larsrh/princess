@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2012-2017 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2012-2018 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -24,7 +24,7 @@ package ap
 import ap.basetypes.{IdealInt, Tree}
 import ap.parser._
 import ap.parameters.{PreprocessingSettings, GoalSettings, ParserSettings,
-                      Param}
+                      ReducerSettings, Param}
 import ap.terfor.{TermOrder, Formula}
 import ap.terfor.TerForConvenience
 import ap.proof.{ModelSearchProver, ExhaustiveProver}
@@ -38,14 +38,14 @@ import ap.terfor.preds.{Atom, PredConj, ReduceWithPredLits}
 import ap.terfor.substitutions.ConstantSubst
 import ap.terfor.conjunctions.{Conjunction, ReduceWithConjunction,
                                IterativeClauseMatcher, Quantifier,
-                               LazyConjunction}
+                               LazyConjunction, SeqReducerPluginFactory}
 import ap.theories.{Theory, TheoryCollector, TheoryRegistry,
                     SimpleArray, MulTheory}
 import ap.proof.theoryPlugins.{Plugin, PluginSequence}
 import IExpression.Sort
 import ap.types.{SortedConstantTerm, SortedIFunction,
-                 MonoSortedIFunction, SortedPredicate, TypeTheory,
-                 IntToTermTranslator}
+                 MonoSortedIFunction, MonoSortedPredicate,
+                 SortedPredicate, TypeTheory, IntToTermTranslator}
 import ap.util.{Debug, Timeout, Seqs}
 
 import scala.collection.mutable.{HashMap => MHashMap, HashSet => MHashSet,
@@ -442,6 +442,12 @@ object SimpleAPI {
         t update subres
     }
   }
+
+  //////////////////////////////////////////////////////////////////////////////
+
+  private val COMMON_PART_NR         = -1
+  private val INTERNAL_AXIOM_PART_NR = -10
+
 }
 
 /**
@@ -575,17 +581,26 @@ class SimpleAPI private (enableAssert : Boolean,
 
     storedStates.clear
     
+    formulaeInProver.clear
     currentOrder = TermOrder.EMPTY
-    existentialConstants = Set()
     functionalPreds = Set()
     functionEnc =
       new FunctionEncoder(Param.TIGHT_FUNCTION_SCOPES(basicPreprocSettings),
                           genTotalityAxioms)
+    abbrevFunctions = Set()
+    abbrevPredicates = Map()
+    theoryPlugin = None
+    theoryCollector = new TheoryCollector
+
+    resetFormulasHelp
+    resetOptionsHelp
+  }
+
+  private def resetFormulasHelp = {
     currentProver = null
     needExhaustiveProver = false
     matchedTotalFunctions = false
     ignoredQuantifiers = false
-    formulaeInProver = List()
     formulaeTodo = false
     currentModel = null
     decoderDataCache.clear
@@ -596,13 +611,13 @@ class SimpleAPI private (enableAssert : Boolean,
     lastStatus = ProverStatus.Unknown
     validityMode = false
     proofThreadStatus = ProofThreadStatus.Init
-    currentPartitionNum = -1
+    currentPartitionNum = COMMON_PART_NR
+  }
+
+  private def resetOptionsHelp = {
+    existentialConstants = Set()
     constructProofs = false
     mostGeneralConstraints = false
-    theoryPlugin = None
-    theoryCollector = new TheoryCollector
-    abbrevFunctions = Set()
-    abbrevPredicates = Map()
   }
 
   private var currentDeadline : Option[Long] = None
@@ -1046,12 +1061,28 @@ class SimpleAPI private (enableAssert : Boolean,
    */
   def addRelation(p : IExpression.Predicate) : Unit = {
     doDumpSMT {
-      println("(declare-fun " + SMTLineariser.quoteIdentifier(p.name) + " (" +
-          (for (_ <- 0 until p.arity) yield "Int").mkString(" ") + ") Bool)")
+      p match {
+        case p : MonoSortedPredicate =>
+          dumpSMTFunDecl(p.name, p.argSorts, SMTParser2InputAbsy.SMTBool)
+        case _ =>
+          dumpSMTFunDecl(p.name,
+                         for (_ <- 0 until p.arity) yield Sort.Integer,
+                         SMTParser2InputAbsy.SMTBool)
+      }
     }
     doDumpScala {
-      println("val " + p.name + " = " +
-              "createRelation(\"" + p.name + "\", " + p.arity + ")")
+      p match {
+        case p : MonoSortedPredicate =>
+          println(
+            "val " + p.name +
+            " = createRelation(\"" + p.name + "\", List(" +
+            (p.argSorts map
+               (PrettyScalaLineariser sort2String _)).mkString(", ") +
+            "))")
+        case _ =>
+          println("val " + p.name + " = " +
+                  "createRelation(\"" + p.name + "\", " + p.arity + ")")
+      }
     }
     addRelationHelp(p)
   }
@@ -1240,11 +1271,7 @@ class SimpleAPI private (enableAssert : Boolean,
                                     argSorts : Seq[Sort],
                                     resSort : Sort) = doDumpSMT {
     val (smtType, optConstr) = SMTLineariser sort2SMTType resSort
-    print("(declare-fun " + SMTLineariser.quoteIdentifier(f.name) + " (" +
-        (for (s <- argSorts)
-         yield SMTLineariser.sort2SMTString(s)).mkString(" ") + ") ")
-    SMTLineariser printSMTType smtType
-    println(")")
+    dumpSMTFunDecl(f.name, argSorts, smtType)
     
     for (constr <- optConstr) {
       import IExpression._
@@ -1259,6 +1286,16 @@ class SimpleAPI private (enableAssert : Boolean,
       SMTLineariser(constr(IFunApp(f, args)))
       println("))")
     }
+  }
+
+  private def dumpSMTFunDecl(name : String,
+                             argSorts : Seq[Sort],
+                             resType : SMTParser2InputAbsy.SMTType) = {
+    print("(declare-fun " + SMTLineariser.quoteIdentifier(name) + " (" +
+        (for (s <- argSorts)
+         yield SMTLineariser.sort2SMTString(s)).mkString(" ") + ") ")
+    SMTLineariser printSMTType resType
+    println(")")
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -1410,6 +1447,20 @@ class SimpleAPI private (enableAssert : Boolean,
     r
   }
 
+  /**
+   * Create a new uninterpreted predicate with the given arguments.<br>
+   * Predicates are more low-level than Boolean functions, and
+   * cannot be used within triggers.
+   */
+  def createRelation(rawName : String, argSorts : Seq[Sort]) = {
+    import IExpression._
+    
+    val name = sanitise(rawName)
+    val r = MonoSortedPredicate(name, argSorts)
+    addRelation(r)
+    r
+  }
+
   //////////////////////////////////////////////////////////////////////////////
 
   /**
@@ -1452,7 +1503,7 @@ class SimpleAPI private (enableAssert : Boolean,
     import IExpression._
     // ensure that nested application of abbreviations are contained in
     // the definition and do not escape, using the AbbrevVariableVisitor
-    withPartitionNumber(-1) {
+    withPartitionNumber(INTERNAL_AXIOM_PART_NR) {
       addFormulaHelp(
         !all(all(trig((a(v(0)) === v(1)) ==>
                       (v(1) === AbbrevVariableVisitor(t, abbrevFunctions)),
@@ -1543,7 +1594,7 @@ class SimpleAPI private (enableAssert : Boolean,
     val aAtom = a()
     val defAtom = defLabel()
 
-    withPartitionNumber(-1) {
+    withPartitionNumber(INTERNAL_AXIOM_PART_NR) {
       addFormulaHelp((aAtom | defAtom | containFunctionApplications(f)) &
                      (!aAtom | !defAtom | containFunctionApplications(!f)))
     }
@@ -1688,7 +1739,7 @@ class SimpleAPI private (enableAssert : Boolean,
     // flush to make sure that no old axioms are left in the
     // function encoder
     flushTodo
-    ReduceWithConjunction(Conjunction.TRUE, functionalPreds, currentOrder)(
+    ReduceWithConjunction(Conjunction.TRUE, currentOrder, reducerSettings)(
       toInternalNoAxioms(f, currentOrder))
   }
   
@@ -1726,9 +1777,8 @@ class SimpleAPI private (enableAssert : Boolean,
   }
 
   /**
-   * Execute an SMT-LIB script. Symbols used in the script have
-   * to be declared in the script as well, i.e., the script has to
-   * be self-contained; however, if the prover already knows about
+   * Execute an SMT-LIB script. Symbols declared in the script will
+   * be added to the prover; however, if the prover already knows about
    * symbols with the same name, they will be reused.
    */
   def execSMTLIB(input : java.io.Reader) : Unit = {
@@ -1737,9 +1787,9 @@ class SimpleAPI private (enableAssert : Boolean,
   }
 
   /**
-   * Extract the assertions in an SMT-LIB script. Symbols used in the script
-   * have to be declared in the script as well, i.e., the script has to
-   * be self-contained; however, if the prover already knows about
+   * Extract the assertions in an SMT-LIB script.
+   * Symbols declared in the script will
+   * be added to the prover; however, if the prover already knows about
    * symbols with the same name, they will be reused.
    */
   def extractSMTLIBAssertions(input : java.io.Reader) : Seq[IFormula] = {
@@ -1749,9 +1799,9 @@ class SimpleAPI private (enableAssert : Boolean,
 
   /**
    * Extract assertions and declared symbols in an SMT-LIB script.
-   * Symbols used in the script have to be declared in the script as
-   * well, i.e., the script has to be self-contained; however, if the
-   * prover already knows about symbols with the same name, they will be reused.
+   * Symbols declared in the script will
+   * be added to the prover; however, if the prover already knows about
+   * symbols with the same name, they will be reused.
    */
   def extractSMTLIBAssertionsSymbols(input : java.io.Reader)
              : (Seq[IFormula],
@@ -1762,25 +1812,13 @@ class SimpleAPI private (enableAssert : Boolean,
     (res, parser.functionTypeMap, parser.constantTypeMap)
   }
 
-/*  private def toSMTEnvironment = {
-    val env = Environment[SMTParser2InputAbsy.SMTType,
-                          SMTParser2InputAbsy.VariableType,
-                          Unit,
-                          SMTParser2InputAbsy.SMTFunctionType]
-    
-    env
-  } */
-
   //////////////////////////////////////////////////////////////////////////////
 
   /**
    * The current theory used for non-linear problems.
    */
   def mulTheory : MulTheory =
-    if (constructProofs)
-      ap.theories.BitShiftMultiplication
-    else
-      ap.theories.nia.GroebnerMultiplication
+    ap.theories.nia.GroebnerMultiplication
 
   /**
    * Generate the product of the given terms. Depending on the arguments,
@@ -2003,13 +2041,12 @@ class SimpleAPI private (enableAssert : Boolean,
     }
 
   private def startExhaustiveProver = {
-    val completeFor = formulaeInProver match {
-      case List((_, f)) => f
-      case formulae => 
-        ReduceWithConjunction(Conjunction.TRUE, functionalPreds, currentOrder)(
-              Conjunction.disj(for ((_, f) <- formulae.iterator) yield f,
-                               currentOrder))
-    }
+    val completeFor =
+      if (formulaeInProver.size == 1)
+        formulaeInProver.keysIterator.next
+      else
+        ReduceWithConjunction(Conjunction.TRUE, currentOrder, reducerSettings)(
+              Conjunction.disj(formulaeInProver.keysIterator, currentOrder))
 
     // explicitly quantify all universal variables
     val uniConstants = completeFor.constants -- existentialConstants
@@ -2176,7 +2213,7 @@ class SimpleAPI private (enableAssert : Boolean,
   private def getSatSoundnessConfig : Theory.SatSoundnessConfig.Value =
     if (needExhaustiveProver || matchedTotalFunctions)
       Theory.SatSoundnessConfig.General
-    else if (formulaeInProver forall { case (_, f) => f.predicates.isEmpty })
+    else if (formulaeInProver.keysIterator forall (_.predicates.isEmpty))
       Theory.SatSoundnessConfig.Elementary
     else
       Theory.SatSoundnessConfig.Existential
@@ -2184,14 +2221,14 @@ class SimpleAPI private (enableAssert : Boolean,
   private def theoriesAreSatComplete =
     theories.isEmpty || {
       val config = getSatSoundnessConfig
-      theories exists (_.isSoundForSat(theories, config))
+      theories forall (_.isSoundForSat(theories, config))
     }
 
   private def getBasicSatStatus : ProverStatus.Value =
     if (validityMode) ProverStatus.Invalid else ProverStatus.Sat
 
   private def allFunctionsArePartial : Boolean =
-    (formulaeInProver forall { case (_, f) => f.predicates forall {
+    (formulaeInProver.keysIterator forall { f => f.predicates forall {
        p => (functionEnc.predTranslation get p) match {
                case Some(f) => f.partial
                case None => true
@@ -2263,7 +2300,7 @@ class SimpleAPI private (enableAssert : Boolean,
    */
   def withPartitionNumber[A](num : Int)(comp : => A) : A = {
     val oldPartitionNum = currentPartitionNum
-    setPartitionNumberHelp(-1)
+    setPartitionNumberHelp(num)
     try {
       comp
     } finally {
@@ -2332,7 +2369,7 @@ class SimpleAPI private (enableAssert : Boolean,
     //-END-ASSERTION-///////////////////////////////////////////////////////////
 
     val formulaParts = new MHashMap[PartName, Conjunction]
-    for (((n, f), num) <- formulaeInProver.iterator.zipWithIndex) {
+    for (((f, n), num) <- formulaeInProver.iterator.zipWithIndex) {
       val name = (partNames get n) match {
         case Some(name) =>
           if (formulaParts contains name)
@@ -2373,11 +2410,11 @@ class SimpleAPI private (enableAssert : Boolean,
     }
     if (currentCertificate == null) {
       warn("call setConstructProofs(true) for more precise unsatisfiable cores")
-      (formulaeInProver.iterator map (_._1)).toSet
+      formulaeInProver.values.toSet
     } else {
       val res = new MHashSet[Int]
       val af = currentCertificate.assumedFormulas
-      for ((n, f) <- formulaeInProver)
+      for ((f, n) <- formulaeInProver)
         if (!(res contains n) && (af contains CertFormula(f.negate)))
           res += n
       res.toSet
@@ -2427,7 +2464,7 @@ class SimpleAPI private (enableAssert : Boolean,
                       val allNames = (for (s <- partitions.iterator;
                                            n <- s.iterator) yield n).toSet
                       formulaeInProver forall {
-                        case (n, _) => n < 0 || (allNames contains n)
+                        case (_, n) => n < 0 || (allNames contains n)
                       }
                     })
     //-END-ASSERTION-///////////////////////////////////////////////////////////
@@ -2438,7 +2475,7 @@ class SimpleAPI private (enableAssert : Boolean,
     val simp = interpolantSimplifier
     
     val commonFors =
-      for ((n, f) <- formulaeInProver; if (n < 0)) yield f
+      for ((f, n) <- formulaeInProver; if (n < 0)) yield f
 
     val interpolants =
       Debug.withDisabledAssertions(
@@ -2446,19 +2483,19 @@ class SimpleAPI private (enableAssert : Boolean,
         for (i <- 1 to (partitions.size - 1)) yield {
           val leftNums = (partitions take i).flatten.toSet
       
-          val leftFors =   for ((n, f) <- formulaeInProver;
+          val leftFors =   for ((f, n) <- formulaeInProver;
                                 if (n >= 0 && (leftNums contains n))) yield f
-          val rightFors =  for ((n, f) <- formulaeInProver;
+          val rightFors =  for ((f, n) <- formulaeInProver;
                                 if (n >= 0 && !(leftNums contains n))) yield f
 
           val iContext =
             InterpolationContext(leftFors, rightFors, commonFors, currentOrder)
           Timeout.withTimeoutMillis(maxQETime) {
             Interpolator(currentSimpCertificate, iContext, true,
-                         functionalPreds)
+                         reducerSettings)
           } {
             Interpolator(currentSimpCertificate, iContext, false,
-                         functionalPreds)
+                         reducerSettings)
           }
         }
       }
@@ -2469,7 +2506,7 @@ class SimpleAPI private (enableAssert : Boolean,
           .sliding(2) zip partitions.iterator) forall {
         case (Seq(left, right), names) => {
           val transitionFors =
-            for ((n, f) <- formulaeInProver;
+            for ((f, n) <- formulaeInProver;
                  if (n < 0 || (names contains n))) yield f.negate
           val theoryAxioms =
             currentSimpCertificate.theoryAxioms map (_.toConj)
@@ -2519,16 +2556,16 @@ class SimpleAPI private (enableAssert : Boolean,
                       val allNames = (for (s <- partitions.iterator;
                                            n <- s.iterator) yield n).toSet
                       formulaeInProver forall {
-                        case (n, _) => n < 0 || (allNames contains n)
+                        case (_, n) => n < 0 || (allNames contains n)
                       }
                     })
     //-END-ASSERTION-///////////////////////////////////////////////////////////
-  
+
     if (currentSimpCertificate == null)
       currentSimpCertificate = ProofSimplifier(currentCertificate)
 
     val commonFors =
-      for ((n, f) <- formulaeInProver; if (n < 0)) yield f
+      for ((f, n) <- formulaeInProver; if (n < 0)) yield f
 
     val simp = interpolantSimplifier
 
@@ -2542,9 +2579,9 @@ class SimpleAPI private (enableAssert : Boolean,
           val subNames =
             (for (s <- names.iterator; n <- s.iterator) yield n).toSet
 
-          val leftFors =   for ((n, f) <- formulaeInProver;
+          val leftFors =   for ((f, n) <- formulaeInProver;
                                 if (n >= 0 && (subNames contains n))) yield f
-          val rightFors =  for ((n, f) <- formulaeInProver;
+          val rightFors =  for ((f, n) <- formulaeInProver;
                                 if (n >= 0 && !(subNames contains n))) yield f
 
           val iContext =
@@ -2553,10 +2590,10 @@ class SimpleAPI private (enableAssert : Boolean,
           val rawInt =
             Timeout.withTimeoutMillis(maxQETime) {
               Interpolator(currentSimpCertificate, iContext, true,
-                           functionalPreds)
+                           reducerSettings)
             } {
               Interpolator(currentSimpCertificate, iContext, false,
-                           functionalPreds)
+                           reducerSettings)
             }
 
           val simpInt = {
@@ -2577,7 +2614,7 @@ class SimpleAPI private (enableAssert : Boolean,
           if (names.children.size == 1 &&
               (rootNames.isEmpty ||
                (formulaeInProver forall {
-                  case (n, f) =>
+                  case (f, n) =>
                     !(n >= 0 && (rootNames contains n)) || f.isFalse
                 })))
             Some(thisInt)
@@ -2598,7 +2635,7 @@ class SimpleAPI private (enableAssert : Boolean,
     def verifyInts(names : Tree[Set[Int]],
                    ints : Tree[Conjunction]) : Boolean = {
       val transitionFors =
-        for ((n, f) <- formulaeInProver;
+        for ((f, n) <- formulaeInProver;
              if (n < 0 || (names.d contains n))) yield f.negate
       val subInts = for (c <- ints.children) yield c.d
       val theoryAxioms = currentSimpCertificate.theoryAxioms map (_.toConj)
@@ -2808,22 +2845,21 @@ class SimpleAPI private (enableAssert : Boolean,
   /**
    * Project a formula to a given set of constants; all other constants
    * are removed by quantifying them universally.
-   * Note that this will also return all formulas that have previously
-   * been asserted in this prover.
    */
   def projectAll(f : IFormula, toConsts : Iterable[ITerm]) : IFormula = {
     //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
     Debug.assertInt(SimpleAPI.AC, ContainsSymbol isClosed f)
     //-END-ASSERTION-///////////////////////////////////////////////////////////
 
-    if (ContainsSymbol isPresburger f) scope {
-      makeExistential(toConsts)
-      setMostGeneralConstraints(true)
-      ?? (f)
-      ??? match {
-        case ProverStatus.Valid   => getConstraint
-        case ProverStatus.Invalid => IBoolLit(false)
-      }
+    if (ContainsSymbol isPresburgerBV f)
+      scope(resetFormulas = true, resetOptions = true) {
+        makeExistential(toConsts)
+        setMostGeneralConstraints(true)
+        ?? (f)
+        ??? match {
+          case ProverStatus.Valid   => getConstraint
+          case ProverStatus.Invalid => IBoolLit(false)
+        }
     } else {
       // formula that we cannot project at the moment
       val toConstsSet =
@@ -2837,22 +2873,21 @@ class SimpleAPI private (enableAssert : Boolean,
   /**
    * Project a formula to a given set of constants; all other constants
    * are removed by quantifying them existentially.
-   * Note that this will also return all formulas that have previously
-   * been asserted in this prover.
    */
   def projectEx(f : IFormula, toConsts : Iterable[ITerm]) : IFormula = {
     //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
     Debug.assertInt(SimpleAPI.AC, ContainsSymbol isClosed f)
     //-END-ASSERTION-///////////////////////////////////////////////////////////
 
-    if (ContainsSymbol isPresburger f) scope {
-      makeExistential(toConsts)
-      setMostGeneralConstraints(true)
-      ?? (~f)
-      ??? match {
-        case ProverStatus.Valid   => ~getConstraint
-        case ProverStatus.Invalid => IBoolLit(true)
-      }
+    if (ContainsSymbol isPresburgerBV f)
+      scope(resetFormulas = true, resetOptions = true) {
+        makeExistential(toConsts)
+        setMostGeneralConstraints(true)
+        ?? (~f)
+        ??? match {
+          case ProverStatus.Valid   => ~getConstraint
+          case ProverStatus.Invalid => IBoolLit(true)
+        }
     } else {
       // formula that we cannot project at the moment
       val toConstsSet =
@@ -2865,19 +2900,17 @@ class SimpleAPI private (enableAssert : Boolean,
   
   /**
    * Simplify a formula by eliminating quantifiers.
-   * Note that this will also return all formulas that have previously
-   * been asserted in this prover.
    */
   def simplify(f : IFormula) : IFormula =
-    if (!(ContainsSymbol isPresburgerWithPreds f)) {
+    if (!(ContainsSymbol isPresburgerBVWithPreds f)) {
       // Formula that we cannot fully simplify at the moment;
       // just run the heuristic simplifier
 
       asIFormula(asConjunction(f))
 
-    } else if ((ContainsSymbol isPresburger f) &&
+    } else if ((ContainsSymbol isPresburgerBV f) &&
                (ContainsSymbol isClosed f)) {
-      // Simplest case, pure Presburger formula
+      // Simplest case, pure Presburger or bit-vector formula
 
       val consts =
         for (c <- SymbolCollector constantsSorted f) yield IConstant(c)
@@ -2902,7 +2935,7 @@ class SimpleAPI private (enableAssert : Boolean,
              extends CollectingVisitor[Unit, IExpression] {
         override def preVisit(t : IExpression,
                               arg : Unit) : PreVisitResult = t match {
-          case a : IAtom => {
+          case a@IAtom(p, _) if !(TheoryRegistry lookupSymbol p).isDefined => {
             val c = replacedAtoms.getOrElseUpdate(a, createConstantRaw("Y"))
             ShortCutResult(eqZero(c))
           }
@@ -3197,7 +3230,7 @@ class SimpleAPI private (enableAssert : Boolean,
             implicit val extendedOrder = order extendPred p
 
             val pAssertion =
-              ReduceWithConjunction(currentModel, functionalPreds, extendedOrder)(
+              ReduceWithConjunction(currentModel, extendedOrder, reducerSettings)(
                 toInternalNoAxioms(!IAtom(p, List(t)), extendedOrder))
             val extendedProver =
               currentProver.assert(currentModel, extendedOrder)
@@ -3235,7 +3268,7 @@ class SimpleAPI private (enableAssert : Boolean,
             implicit val extendedOrder = order extend c
 
             val cAssertion =
-              ReduceWithConjunction(currentModel, functionalPreds, extendedOrder)(
+              ReduceWithConjunction(currentModel, extendedOrder, reducerSettings)(
                 toInternalNoAxioms(IExpression.i(c) =/= t, extendedOrder))
             val extendedProver =
               (ModelSearchProver emptyIncProver goalSettings
@@ -3330,7 +3363,7 @@ class SimpleAPI private (enableAssert : Boolean,
         val extendedOrder = order extend c
         
         val reduced =
-          ReduceWithConjunction(currentModel, functionalPreds, extendedOrder)(
+          ReduceWithConjunction(currentModel, extendedOrder, reducerSettings)(
                                 toInternalNoAxioms(t === c, extendedOrder))
 
         //-BEGIN-ASSERTION-/////////////////////////////////////////////////////
@@ -3624,8 +3657,8 @@ class SimpleAPI private (enableAssert : Boolean,
             val p = new IExpression.Predicate("p", 0)
             implicit val extendedOrder = order extendPred p
             val pAssertion =
-              ReduceWithConjunction(currentModel, functionalPreds,
-                                    extendedOrder)(
+              ReduceWithConjunction(currentModel, extendedOrder,
+                                    reducerSettings)(
                 toInternalNoAxioms(IAtom(p, Seq()) </> f, extendedOrder))
             val extendedProver =
               currentProver.assert(currentModel, extendedOrder)
@@ -3727,8 +3760,9 @@ class SimpleAPI private (enableAssert : Boolean,
           Right(intF)
         } else {
           val reduced =
-            ReduceWithConjunction(currentModel, functionalPreds,
-                                  currentModel.order)(intF)
+            ReduceWithConjunction(currentModel,
+                                  currentModel.order,
+                                  reducerSettings)(intF)
 
           if (reduced.isTrue)
             Left(true)
@@ -3749,6 +3783,32 @@ class SimpleAPI private (enableAssert : Boolean,
    */
   def scope[A](comp: => A) : A = {
     push
+    try {
+      comp
+    } finally {
+      if (getStatusHelp(false) == ProverStatus.Running) {
+        // then something really bad happened, and we are in an inconsistent
+        // state
+        proverCmd put ShutdownCommand
+        stopProofTask = true
+      } else {
+        pop
+      }
+    }
+  }
+  
+  /**
+   * Execute a computation within a local scope. After leaving the scope,
+   * assertions and declarations done in the meantime will disappear.
+   * This method has the
+   * option to temporarily forget all asserted formulas, or
+   * temporarily reset the options <code>setConstructProofs,
+   * setMostGeneralConstraints, makeExistential, makeUniversal</code>.
+   */
+  def scope[A](resetFormulas : Boolean = false,
+               resetOptions : Boolean = false)
+              (comp: => A) : A = {
+    pushEmptyFrame(resetFormulas, resetOptions)
     try {
       comp
     } finally {
@@ -3787,7 +3847,7 @@ class SimpleAPI private (enableAssert : Boolean,
                        matchedTotalFunctions, ignoredQuantifiers,
                        currentOrder, existentialConstants,
                        functionalPreds, functionEnc.clone,
-                       formulaeInProver,
+                       formulaeInProver.clone,
                        currentPartitionNum,
                        constructProofs, mostGeneralConstraints,
                        validityMode, lastStatus,
@@ -3795,6 +3855,41 @@ class SimpleAPI private (enableAssert : Boolean,
                        abbrevFunctions,
                        abbrevPredicates)
   }
+
+  /**
+   * Add a new frame to the assertion stack. This method has the
+   * option to temporarily forget all asserted formulas, or
+   * temporarily reset the options <code>setConstructProofs,
+   * setMostGeneralConstraints, makeExistential, makeUniversal</code>.
+   */
+  def pushEmptyFrame(resetFormulas : Boolean = false,
+                     resetOptions : Boolean = false) : Unit =
+    if (!resetFormulas && !resetOptions) {
+      push
+    } else {
+      doDumpSMT {
+        println("(push 1) ; pushEmptyFrame(resetFormulas = " + resetFormulas +
+                ", resetOptions = " + resetOptions + ")")
+      }
+      doDumpScala {
+        println
+        println("scope(resetFormulas = " + resetFormulas +
+                ", resetOptions = " + resetOptions + ") {")
+      }
+
+      pushHelp
+
+      if (resetFormulas) {
+        resetFormulasHelp
+        // only keep asserted axioms
+        formulaeInProver =
+          formulaeInProver filter { case (_, n) => n == INTERNAL_AXIOM_PART_NR }
+      }
+
+      if (resetOptions) {
+        resetOptionsHelp
+      }
+    }
   
   /**
    * Pop the top-most frame from the assertion stack.
@@ -3872,7 +3967,7 @@ class SimpleAPI private (enableAssert : Boolean,
 
       rawFormulaeTodo = LazyConjunction.FALSE
       val reducedFor =
-        ReduceWithConjunction(Conjunction.TRUE, functionalPreds, currentOrder)(
+        ReduceWithConjunction(Conjunction.TRUE, currentOrder, reducerSettings)(
                               completeFor)
       addToProver(reducedFor, axioms)
     }
@@ -3892,17 +3987,41 @@ class SimpleAPI private (enableAssert : Boolean,
 
   private def addToProver(preCompleteFor : Conjunction,
                           preAxioms : Conjunction) : Unit = {
-    val completeFor =
+    val incomp = Array(false)
+    val completeFor = ap.theories.ModuloArithmetic.incompletenessFlag.withValue(incomp) {
       convertQuantifiers(Theory.preprocess(preCompleteFor,
                                            theories,
                                            currentOrder))
+    }
+
+    if (incomp(0))
+      ignoredQuantifiers = true
+
     val axioms =
       convertQuantifiers(preAxioms)
 
+    var relevantFormulas = false
+
     if (!completeFor.isFalse)
-      formulaeInProver = (currentPartitionNum, completeFor) :: formulaeInProver
+      formulaeInProver.put(completeFor, currentPartitionNum) match {
+        case None =>
+          relevantFormulas = true
+        case Some(oldNum) =>
+          // the prover already knew about the formula
+          formulaeInProver.put(completeFor, oldNum)
+      }
+
     if (!axioms.isFalse)
-      formulaeInProver = (-1, axioms) :: formulaeInProver
+      formulaeInProver.put(axioms, INTERNAL_AXIOM_PART_NR) match {
+        case None =>
+          relevantFormulas = true
+        case Some(oldNum) =>
+          // the prover already knew about the formula
+          formulaeInProver.put(axioms, oldNum)
+      }
+
+    if (!relevantFormulas)
+      return
 
     proofThreadStatus match {
       case ProofThreadStatus.Init =>
@@ -4070,7 +4189,7 @@ class SimpleAPI private (enableAssert : Boolean,
           (theoryCollector.newTheories exists {
              t => t.predicates exists (_.isInstanceOf[SortedPredicate])
            })) {
-        addTheory(TypeTheory)
+        addTypeTheory
         return checkNewTheories
       }
 
@@ -4132,7 +4251,16 @@ class SimpleAPI private (enableAssert : Boolean,
                  p <- t.singleInstantiationPredicates.iterator) yield p).toSet)
     gs = Param.THEORY_PLUGIN.set(gs, theoryPlugin)
     gs = Param.RANDOM_DATA_SOURCE.set(gs, randomDataSource)
+    gs = Param.REDUCER_SETTINGS.set(gs, reducerSettings)
     gs
+  }
+
+  private def reducerSettings = {
+    var rs = ReducerSettings.DEFAULT
+    rs = Param.FUNCTIONAL_PREDICATES.set(rs, functionalPreds)
+    rs = Param.REDUCER_PLUGIN.set(
+         rs, SeqReducerPluginFactory(for (t <- theories) yield t.reducerPlugin))
+    rs
   }
 
   // TODO: correct setting even if Theories are used?
@@ -4169,8 +4297,8 @@ class SimpleAPI private (enableAssert : Boolean,
   private var currentConstraint : Conjunction = _
   private var currentCertificate : Certificate = _
   private var currentSimpCertificate : Certificate = _
-  private var formulaeInProver : List[(Int, Conjunction)] = List()
-  private var currentPartitionNum : Int = -1
+  private var formulaeInProver = new LinkedHashMap[Conjunction, Int]
+  private var currentPartitionNum : Int = COMMON_PART_NR
   private var constructProofs : Boolean = false
   private var mostGeneralConstraints : Boolean = false
   private var formulaeTodo : IFormula = false
@@ -4189,7 +4317,7 @@ class SimpleAPI private (enableAssert : Boolean,
                                              Set[IExpression.ConstantTerm],
                                              Set[IExpression.Predicate],
                                              FunctionEncoder,
-                                             List[(Int, Conjunction)],
+                                             LinkedHashMap[Conjunction, Int],
                                              Int,
                                              Boolean,
                                              Boolean,
@@ -4210,7 +4338,7 @@ class SimpleAPI private (enableAssert : Boolean,
   private def initProver =
     if (!needExhaustiveProver && currentProver == null)
       currentProver = (ModelSearchProver emptyIncProver goalSettings)
-                          .conclude(formulaeInProver.unzip._2, currentOrder)
+                          .conclude(formulaeInProver.unzip._1, currentOrder)
   
   private def restartProofThread =
     (proofThreadStatus = ProofThreadStatus.Init)
@@ -4359,6 +4487,10 @@ class SimpleAPI private (enableAssert : Boolean,
             // this exception indicates a stack overflow as well,
             // but probably the system has to be restarted at this point
             proverRes put OutOfMemoryResult
+          case t : InterruptedException =>
+            // somebody interrupted the thread, we assume that it is
+            // supposed to die
+            cont = false
           case t : Throwable =>
             // hope that we are able to continue
             proverRes put ExceptionResult(t)

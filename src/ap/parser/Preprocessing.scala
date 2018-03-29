@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2009-2017 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2009-2018 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -25,7 +25,7 @@ import ap._
 import ap.terfor.{ConstantTerm, TermOrder}
 import ap.terfor.conjunctions.Quantifier
 import ap.parameters.{PreprocessingSettings, Param}
-import ap.theories.TheoryRegistry
+import ap.theories.{Theory, TheoryRegistry}
 
 import scala.collection.mutable.{HashSet => MHashSet, HashMap => MHashMap}
 
@@ -59,23 +59,35 @@ object Preprocessing {
             : (List[INamedPart], List[IInterpolantSpec], Signature) = {
 
     // turn the formula into a list of its named parts
-    val fors = PartExtractor(f)
+    val fors1a = PartExtractor(f)
 
     // the other steps can be skipped for simple cases
     if ((functionEncoder.axioms match {
            case IBoolLit(true) => true
            case _ => false
          }) &&
-        !needsPreprocessing(fors))
-      return (fors, interpolantSpecs, signature)
+        !needsPreprocessing(fors1a))
+      return (fors1a, interpolantSpecs, signature)
+
+    // theory-specific preprocessing
+    val (fors1b, signature2) = {
+      val theories = signature.theories
+      var sig = signature
+      val newFors = for (f <- fors1a) yield {
+        val (newF, newSig) = Theory.iPreprocess(f, signature.theories, sig)
+        sig = newSig
+        newF
+      }
+      (newFors, sig)
+    }
 
     // partial evaluation, expand equivalences
-    val fors2 =
-      for (f <- fors)
+    val fors2a =
+      for (f <- fors1b)
       yield EquivExpander(PartialEvaluator(f)).asInstanceOf[INamedPart]
 
     // simple mini-scoping for existential quantifiers
-    val fors2a = for (f <- fors2) yield SimpleMiniscoper(f)
+    val fors2b = for (f <- fors2a) yield SimpleMiniscoper(f)
 
     // compress chains of implications
 //    val fors2b = for (INamedPart(n, f) <- fors2a)
@@ -84,7 +96,7 @@ object Preprocessing {
     ////////////////////////////////////////////////////////////////////////////
     // Handling of triggers
 
-    var order3 = signature.order
+    var order3 = signature2.order
     def encodeFunctions(f : IFormula) : IFormula = {
       val (g, o) = functionEncoder(f, order3)
       order3 = o
@@ -92,11 +104,11 @@ object Preprocessing {
     }
 
     val theoryTriggerFunctions =
-      (for (t <- signature.theories.iterator;
+      (for (t <- signature2.theories.iterator;
             f <- t.triggerRelevantFunctions.iterator) yield f).toSet
     // all uninterpreted functions occurring in the problem
     val problemFunctions =
-      for (f <- FunctionCollector(fors2a);
+      for (f <- FunctionCollector(fors2b);
            if (!(TheoryRegistry lookupSymbol f).isDefined))
       yield f
 
@@ -113,7 +125,7 @@ object Preprocessing {
     lazy val stdTriggerGenerator = {
       val gen = new TriggerGenerator (allTriggeredFunctions,
                                       Param.TRIGGER_STRATEGY(settings))
-      for (f <- fors2a)
+      for (f <- fors2b)
         gen setup f
       gen
     }
@@ -123,7 +135,7 @@ object Preprocessing {
            Param.TriggerGenerationOptions.CompleteFrugal => {
 
         val disjuncts =
-          (for (INamedPart(n, f) <- fors2a.iterator;
+          (for (INamedPart(n, f) <- fors2b.iterator;
                 f2 <- LineariseVisitor(Transform2NNF(f), IBinJunctor.Or).iterator)
            yield (INamedPart(n, f2))).toArray
   
@@ -204,7 +216,7 @@ println
             val triggerGenerator =
               new TriggerGenerator (totalFunctions,
                                     Param.TRIGGER_STRATEGY(settings))
-            for (f <- fors2a)
+            for (f <- fors2b)
               triggerGenerator setup f
 
             for ((INamedPart(n, disjunct), funs) <- impliedTotalFunctions) yield {
@@ -240,7 +252,7 @@ println
       }
 
       case _ => {
-        val withTriggers = for (f <- fors2a) yield stdTriggerGenerator(f)
+        val withTriggers = for (f <- fors2b) yield stdTriggerGenerator(f)
 
         for (INamedPart(n, f) <- withTriggers)
         yield INamedPart(n, encodeFunctions(f))
@@ -282,7 +294,7 @@ println
         for (f <- fors5) yield SimpleClausifier(f).asInstanceOf[INamedPart]
     }
     
-    (fors6, interpolantSpecs, signature updateOrder order3)
+    (fors6, interpolantSpecs, signature2 updateOrder order3)
   }
 
   //////////////////////////////////////////////////////////////////////////////
@@ -306,9 +318,13 @@ println
 
       t match {
         case _ : IConstant | _ : IIntLit | _ : IPlus | _ : ITimes |
-             _ : IAtom | _ : IBoolLit | _ : IIntFormula | _ : INot |
-             IBinFormula(IBinJunctor.And | IBinJunctor.Or, _, _) => KeepArg
-        case _ => throw NeedsPreprocException
+             _ : IBoolLit | _ : IIntFormula | _ : INot |
+             IBinFormula(IBinJunctor.And | IBinJunctor.Or, _, _) =>
+          KeepArg
+        case IAtom(p, _) if (TheoryRegistry lookupSymbol p).isEmpty =>
+          KeepArg
+        case _ =>
+          throw NeedsPreprocException
       }
     }
     def postVisit(t : IExpression, arg : Unit, subres : Seq[Unit]) : Unit = ()

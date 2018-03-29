@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2009-2017 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2009-2018 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -23,6 +23,7 @@ package ap.parser;
 
 import IExpression.{ConstantTerm, Predicate}
 import ap.terfor.conjunctions.Quantifier
+import ap.theories.{TheoryRegistry, ModuloArithmetic}
 import ap.util.{Debug, Logic, PlainRange, Seqs}
 
 import scala.collection.mutable.{ArrayStack => Stack, ArrayBuffer,
@@ -597,6 +598,45 @@ object VariableSubstVisitor
 
 ////////////////////////////////////////////////////////////////////////////////
 
+/**
+ * Substitute variables in an expression with arbitrary terms,
+ * and immediately simplify the resulting expression if possible.
+ */
+object SimplifyingVariableSubstVisitor
+       extends CollectingVisitor[(List[ITerm], Int), IExpression] {
+  def apply(t : IExpression, substShift : (List[ITerm], Int)) : IExpression =
+    SimplifyingVariableSubstVisitor.visit(t, substShift)
+  def apply(t : ITerm, substShift : (List[ITerm], Int)) : ITerm =
+    apply(t.asInstanceOf[IExpression], substShift).asInstanceOf[ITerm]
+  def apply(t : IFormula, substShift : (List[ITerm], Int)) : IFormula =
+    apply(t.asInstanceOf[IExpression], substShift).asInstanceOf[IFormula]
+
+  override def preVisit(t : IExpression,
+                        substShift : (List[ITerm], Int)) : PreVisitResult =
+    t match {
+      case IVariable(index) => {
+        val (subst, shift) = substShift
+        ShortCutResult(if (index >= subst.size)
+                         IVariable(index + shift)
+                       else
+                         subst(index))
+      }
+      case _ : IQuantified | _ : IEpsilon => {
+        val (subst, shift) = substShift
+        val newSubst = for (t <- subst) yield VariableShiftVisitor(t, 0, 1)
+        UniSubArgs((IVariable(0) :: newSubst, shift))
+      }
+      case _ => KeepArg
+    }
+
+  def postVisit(t : IExpression,
+                substShift : (List[ITerm], Int),
+                subres : Seq[IExpression]) : IExpression =
+    IExpression.updateAndSimplifyLazily(t, subres)
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 object SymbolCollector {
   def variables(t : IExpression) : scala.collection.Set[IVariable] = {
     val variables = new MHashSet[IVariable]
@@ -748,6 +788,24 @@ object ContainsSymbol extends ContextAwareVisitor[IExpression => Boolean, Unit] 
      })
 
   /**
+   * Check whether given formula is in Presburger or bit-vector arithmetic.
+   */
+  def isPresburgerBV(t : IExpression) : Boolean =
+    !apply(t, (x:IExpression) => x match {
+       case IFunApp(f, _) =>
+         (TheoryRegistry lookupSymbol f) match {
+           case Some(ModuloArithmetic) => false
+           case _ => true
+         }
+       case IAtom(p, _) =>
+         (TheoryRegistry lookupSymbol p) match {
+           case Some(ModuloArithmetic) => false
+           case _ => true
+         }
+       case _ => false
+     })
+
+  /**
    * Check whether given formula is in Presburger arithmetic, but
    * possibly including predicate atoms in which all arguments
    * are concrete numbers.
@@ -757,6 +815,27 @@ object ContainsSymbol extends ContextAwareVisitor[IExpression => Boolean, Unit] 
        case _ : IFunApp => true
        case IAtom(_, args) => !(args forall (_.isInstanceOf[IIntLit]))
        case _ => false
+     })
+
+  /**
+   * Check whether given formula is in Presburger or bit-vector arithmetic, but
+   * possibly including predicate atoms in which all arguments
+   * are concrete numbers.
+   */
+  def isPresburgerBVWithPreds(t : IExpression) : Boolean =
+    !apply(t, (x:IExpression) => x match {
+       case IFunApp(f, _) =>
+         (TheoryRegistry lookupSymbol f) match {
+           case Some(ModuloArithmetic) => false
+           case _ => true
+         }
+       case IAtom(p, args) =>
+         (TheoryRegistry lookupSymbol p) match {
+           case Some(ModuloArithmetic) => false
+           case _ => !(args forall (_.isInstanceOf[IIntLit]))
+         }
+       case _ =>
+         false
      })
 
   def apply(t : IExpression, pred : IExpression => Boolean) : Boolean = try {
@@ -1010,6 +1089,65 @@ object IsUniversalFormulaVisitor extends ContextAwareVisitor[Unit, Unit] {
     case IQuantified(q, body)
       if (isEX(q, ctxt) && !ContainsSymbol.freeFrom(body, v0Set)) =>
         throw FoundQuantifier
+    case _ =>
+      super.preVisit(t, ctxt)
+  }
+
+  def postVisit(t : IExpression, ctxt : Context[Unit],
+                subres : Seq[Unit]) : Unit = ()
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+object QuantifierCollectingVisitor {
+  private object FoundAll extends Exception
+
+  def apply(f : IExpression) : Set[Quantifier] = {
+    val visitor = new QuantifierCollectingVisitor
+    try {
+      visitor.visitWithoutResult(f, Context({}))
+      visitor.foundQuantifiers.toSet
+    } catch {
+      case FoundAll => visitor.foundQuantifiers.toSet
+    }
+  }
+
+  private val V0Sum = IExpression.SymbolSum(IVariable(0))
+}
+
+/**
+ * Visitor for collecting all quantifiers in a formula. The visitor
+ * will not consider quantifiers expressing divisibility constraints.
+ */
+class QuantifierCollectingVisitor extends ContextAwareVisitor[Unit, Unit] {
+
+  import QuantifierCollectingVisitor._
+
+  private val foundQuantifiers = new MHashSet[Quantifier]
+
+  override def preVisit(t : IExpression,
+                        ctxt : Context[Unit]) : PreVisitResult = t match {
+    case IQuantified(Quantifier.EX,  IExpression.EqZ(V0Sum(_, _))) |
+         IQuantified(Quantifier.ALL, INot(IExpression.EqZ(V0Sum(_, _)))) =>
+      // divisibility, ignored
+      super.preVisit(t, ctxt)
+
+    case IQuantified(q, _) => {
+      if (ctxt.polarity > 0) {
+        foundQuantifiers += q
+      } else if (ctxt.polarity < 0) {
+        foundQuantifiers += q.dual
+      } else {
+        foundQuantifiers += Quantifier.ALL
+        foundQuantifiers += Quantifier.EX
+      }
+
+      if (foundQuantifiers.size == 2)
+        throw FoundAll
+
+      super.preVisit(t, ctxt)
+    }
+
     case _ =>
       super.preVisit(t, ctxt)
   }

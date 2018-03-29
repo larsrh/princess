@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2009-2014 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2009-2017 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -57,7 +57,17 @@ object IdealInt {
    */
   def apply(i : Int) : IdealInt =
     if (minCached <= i && i <= maxCached) fromCache(i) else newIdealInt(i)
-  
+
+  /**
+   * Extract a 32-bit integer from an <code>IdealInt</code>.
+   */
+  def unapply(n : IdealInt) : Option[Int] =
+    if (n.usesLong &&
+        Int.MinValue <= n.longStore && n.longStore <= Int.MaxValue)
+      Some(n.longStore.toInt)
+    else
+      None
+
   def apply(i : Long) : IdealInt =
     if (minCached <= i && i <= maxCached) fromCache(i.toInt) else newIdealInt(i)
 
@@ -608,6 +618,49 @@ final class IdealInt private (private val longStore : Long,
                      that * quot + rem == this)
     //-END-ASSERTION-///////////////////////////////////////////////////////////
     (quot, rem)
+  }
+
+  /**
+   * Bit-wise and.
+   */
+  def &  (that: IdealInt): IdealInt = {
+    //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
+    Debug.assertPre(IdealInt.AC, this.signum >= 0 && that.signum >= 0)
+    //-END-ASSERTION-///////////////////////////////////////////////////////////
+    if (this.usesLong && that.usesLong)
+      IdealInt(this.longStore & that.longStore)
+    else
+      IdealInt(this.getBI and that.getBI)
+  }
+
+  /**
+   * Bit-wise or.
+   */
+  def |  (that: IdealInt): IdealInt = {
+    //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
+    Debug.assertPre(IdealInt.AC, this.signum >= 0 && that.signum >= 0)
+    //-END-ASSERTION-///////////////////////////////////////////////////////////
+    if (this.usesLong && that.usesLong)
+      IdealInt(this.longStore | that.longStore)
+    else
+      IdealInt(this.getBI or that.getBI)
+  }
+
+  def getHighestSetBit : Int = {
+    //-BEGIN-ASSERTION-/////////////////////////////////////////////////////////
+    Debug.assertPre(IdealInt.AC, this.signum > 0)
+    //-END-ASSERTION-///////////////////////////////////////////////////////////
+    if (this.usesLong) {
+      var n = this.longStore >> 1
+      var res = 0
+      while (n != 0) {
+        n = n >> 1
+        res = res + 1
+      }
+      res
+    } else {
+      this.getBI.bitLength - 1
+    }
   }
 
   /** 

@@ -3,7 +3,7 @@
  * arithmetic with uninterpreted predicates.
  * <http://www.philipp.ruemmer.org/princess.shtml>
  *
- * Copyright (C) 2009-2017 Philipp Ruemmer <ph_r@gmx.net>
+ * Copyright (C) 2009-2018 Philipp Ruemmer <ph_r@gmx.net>
  *
  * Princess is free software: you can redistribute it and/or modify
  * it under the terms of the GNU Lesser General Public License as published by
@@ -38,7 +38,7 @@ import ap.util.{Debug, Seqs, Timeout}
 
 object CmdlMain {
 
-  val version = "release 2017-07-17"
+  val version = "unstable build"
 
   def printGreeting = {
     println("________       _____")                                 
@@ -50,7 +50,7 @@ object CmdlMain {
     println("A Theorem Prover for First-Order Logic modulo Linear Integer Arithmetic")
     println("(" + version + ")")
     println
-    println("(c) Philipp Rümmer, 2009-2017")
+    println("(c) Philipp Rümmer, 2009-2018")
     println("(contributions by Angelo Brillout, Peter Backeman, Peter Baumgartner)")
     println("Free software under GNU Lesser General Public License (LGPL).")
     println("Bug reports to ph_r@gmx.net")
@@ -180,7 +180,7 @@ object CmdlMain {
       
       def linearise : Unit = {
         import IExpression._
-        TPTPLineariser(prover.originalInputFormula, filename)
+        TPTPLineariser(prover.rawInputFormula, filename)
       }
       
       if (Param.PRINT_TPTP_FILE(settings) != "-") {
@@ -541,7 +541,10 @@ object CmdlMain {
                 }
                 println(")")
               }
-              case Prover.Model(model) =>  {
+              case Prover.Model(_) =>  {
+                println("unsat")
+              }
+              case Prover.AllModels(_, _) =>  {
                 println("unsat")
               }
               case Prover.NoModel =>  {
@@ -598,7 +601,6 @@ object CmdlMain {
 //                Console.err.println("Number of existential constants: " +
 //                                    existentialConstantNum(tree))
                 model match {
-                  case IBoolLit(true) => // nothing
                   case _ if (
                           LineariseVisitor(constraint, IBinJunctor.And) forall {
                             case IExpression.Eq(_, _) => true
@@ -639,7 +641,7 @@ object CmdlMain {
               case Prover.CounterModel(optModel) =>  {
                 println("INVALID")
                 optModel match {
-                  case None | Some(IBoolLit(true)) => // nothing
+                  case None => // nothing
                   case Some(model) => {
                     println
                     println("Countermodel:")
@@ -655,7 +657,7 @@ object CmdlMain {
               case Prover.MaybeCounterModel(optModel) =>  {
                 println("UNKNOWN")
                 optModel match {
-                  case None | Some(IBoolLit(true)) => // nothing
+                  case None => // nothing
                   case Some(model) => {
                     println
                     println("Possible countermodel:")
@@ -708,8 +710,26 @@ object CmdlMain {
                   printModel(model)
                 }
               }
+              case Prover.AllModels(constraint, optModel) =>  {
+                println("VALID")
+                if (Param.MOST_GENERAL_CONSTRAINT(settings)) {
+                  println
+                  println("Equivalent constraint:")
+                  printFormula(constraint)
+                }
+                for (model <- optModel) {
+                  println
+                  println("Concrete witness:")
+                  printModel(model)
+                }
+              }
               case Prover.NoModel =>  {
                 println("INVALID")
+                if (Param.MOST_GENERAL_CONSTRAINT(settings)) {
+                  println
+                  println("Equivalent constraint:")
+                  println("false")
+                }
               }
               case Prover.TimeoutProof(tree) =>  {
                 println("CANCELLED/TIMEOUT")
